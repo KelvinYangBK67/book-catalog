@@ -1,0 +1,71 @@
+# 紙上藏書
+
+用於管理個人紙質藏書的本地 Web 應用。資料依照 `Work → Edition → Copy` 三層保存，提供新增、列表、完整詳情、修改及跨字段搜尋。
+
+首頁按 Work 聚合，並可切換全部藏書、文種、標籤、出版社、藏書位置或年份視圖。點開作品後列出 Edition，再展開版本查看 Copy；Copy 列表只顯示系統編號與藏書位置，點擊後可查看完整資料。
+
+Edition 保存「版本」（例如初版、修訂版、第 2 版）；卷冊（例如 1、1.2.3）記在 Copy，因此同一版本的多個卷冊會歸在同一 Edition。某卷只有一本時直接顯示藏書位置，只有同卷存在多本重複藏書時才展開 Copy 清單。Work、Edition、Copy 均可在各自層級直接修改。
+
+層級會按資料自動壓縮：題名與作者相同的記錄復用 Work；明確版本名稱相同的記錄復用 Edition；卷冊文字相同的 Copy 歸為同一卷冊組。Work 只有一個 Edition 時省略版本下拉，Edition 只有一個卷冊時省略卷冊下拉。版本名稱留空時仍按完整出版信息比對，以免誤合併未知版本。
+
+Work 保存題名、副標題、作者或相關責任人及可多選的文種。Edition 保存 ISBN／識別號、其他題名、翻譯題名、譯者或相關責任人等版本資料。識別號不限制 ISBN 格式。
+
+錄入時可直接用空格輸入多個標籤，系統會自動建立新標籤；標籤管理支援改名與 `上級 → 子級` 階層調整。出版社會保留書上所印的原始名稱，同時建立出版社實體與別名；建立一次關聯後，後續錄入會自動識別。
+
+## 啟動
+
+### 一鍵啟動（Windows）
+
+雙擊專案根目錄的 [`start_library.bat`](start_library.bat)。首次啟動會自動建立 `.venv` 並安裝所需組件；之後會直接開啟瀏覽器及服務。關閉命令窗口或在其中按 `Ctrl+C` 即可停止。
+
+### 手動啟動
+
+需要 Python 3.11 或以上版本。在專案目錄執行：
+
+```powershell
+python -m venv .venv
+.venv\Scripts\Activate.ps1
+python -m pip install -r requirements.txt
+python -m uvicorn app.main:app --host 127.0.0.1 --port 17321 --reload
+```
+
+然後開啟 <http://127.0.0.1:17321>。API 文件位於 <http://127.0.0.1:17321/docs>。
+
+本專案固定使用本地埠 `17321`。建立專案時已確認該埠未被其他程序監聽，且不在 Windows TCP 排除範圍內。
+
+## 資料與備份
+
+資料預設保存於 `data/library.db`，與程序碼分開且不納入 Git。停止應用後，直接複製此檔即可備份。
+
+也可以用環境變數把資料庫放到其他位置：
+
+```powershell
+$env:LIBRARY_DATABASE = "D:\BookData\library.db"
+python -m uvicorn app.main:app --host 127.0.0.1 --port 17321
+```
+
+應用啟動時會自動建立目錄、資料庫及資料表。
+
+## 本機字體
+
+字體檔不隨本專案發布。未設定字體庫時，WebUI 直接使用瀏覽器及作業系統的預設字體。
+
+本機若有 IMPE 字體庫，可指定其 `assets/fonts` 目錄。偵測成功後，拉丁文字使用 Libertinus，漢字使用 Shanggu；天城文、藏文、西夏文、契丹小字、諺文、假名、蒙古文及其他文字按 Unicode 區段使用相應的 Noto 等字體。若要使用 Libertinus，需另將 Web 字體放在 `static/fonts/libertinus` 或 `static/fonts/web`。
+
+如 IMPE 字體庫移至其他位置，可在啟動前指定：
+
+```powershell
+$env:LIBRARY_FONT_ROOT = "D:\新的位置\assets\fonts"
+```
+
+## 搜尋範圍
+
+單一搜尋框會同時比對題名、副標題、作者或相關責任人、文種、ISBN／識別號、其他題名、翻譯題名、出版社及其別名、標籤、藏書位置和閱讀記錄。
+
+## 測試
+
+測試使用獨立的臨時 SQLite 資料庫，不會接觸正式資料：
+
+```powershell
+python -m unittest discover -s tests -v
+```

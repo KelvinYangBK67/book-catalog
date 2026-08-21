@@ -1,0 +1,258 @@
+from __future__ import annotations
+
+import os
+import sqlite3
+from contextlib import contextmanager
+from pathlib import Path
+from typing import Iterator
+
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+DEFAULT_DATABASE = PROJECT_ROOT / "data" / "library.db"
+
+
+def database_path() -> Path:
+    configured = os.getenv("LIBRARY_DATABASE")
+    return Path(configured).expanduser().resolve() if configured else DEFAULT_DATABASE
+
+
+def connect(path: Path | None = None) -> sqlite3.Connection:
+    target = path or database_path()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    connection = sqlite3.connect(target)
+    connection.row_factory = sqlite3.Row
+    connection.execute("PRAGMA foreign_keys = ON")
+    return connection
+
+
+@contextmanager
+def transaction(path: Path | None = None) -> Iterator[sqlite3.Connection]:
+    connection = connect(path)
+    try:
+        yield connection
+        connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
+    finally:
+        connection.close()
+
+
+def initialize(path: Path | None = None) -> None:
+    with transaction(path) as connection:
+        connection.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS works (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                title TEXT NOT NULL,
+                subtitle TEXT NOT NULL DEFAULT '',
+                authors TEXT NOT NULL DEFAULT '',
+                scripts TEXT NOT NULL DEFAULT ''
+            );
+
+            CREATE TABLE IF NOT EXISTS publishers (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                canonical_name TEXT NOT NULL COLLATE NOCASE UNIQUE
+            );
+
+            CREATE TABLE IF NOT EXISTS publisher_aliases (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                publisher_id INTEGER NOT NULL REFERENCES publishers(id) ON DELETE CASCADE,
+                alias TEXT NOT NULL COLLATE NOCASE UNIQUE
+            );
+
+            CREATE TABLE IF NOT EXISTS editions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                work_id INTEGER NOT NULL REFERENCES works(id) ON DELETE CASCADE,
+                identifier TEXT NOT NULL DEFAULT '',
+                translator TEXT NOT NULL DEFAULT '',
+                other_title TEXT NOT NULL DEFAULT '',
+                translated_title TEXT NOT NULL DEFAULT '',
+                translated_subtitle TEXT NOT NULL DEFAULT '',
+                translation_script TEXT NOT NULL DEFAULT '',
+                version TEXT NOT NULL DEFAULT '',
+                publisher TEXT NOT NULL DEFAULT '',
+                publisher_id INTEGER REFERENCES publishers(id) ON DELETE SET NULL,
+                publication_year INTEGER,
+                CHECK (publication_year IS NULL OR publication_year BETWEEN 0 AND 9999)
+            );
+
+            CREATE TABLE IF NOT EXISTS copies (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                edition_id INTEGER NOT NULL REFERENCES editions(id) ON DELETE CASCADE,
+                volume TEXT NOT NULL DEFAULT '',
+                acquisition_date TEXT,
+                location TEXT NOT NULL DEFAULT '',
+                reading_record TEXT NOT NULL DEFAULT ''
+            );
+
+            CREATE TABLE IF NOT EXISTS tags (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                parent_id INTEGER REFERENCES tags(id) ON DELETE RESTRICT,
+                UNIQUE(parent_id, name)
+            );
+
+            CREATE TABLE IF NOT EXISTS work_tags (
+                work_id INTEGER NOT NULL REFERENCES works(id) ON DELETE CASCADE,
+                tag_id INTEGER NOT NULL REFERENCES tags(id) ON DELETE CASCADE,
+                PRIMARY KEY (work_id, tag_id)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_works_title ON works(title);
+            CREATE INDEX IF NOT EXISTS idx_editions_publisher ON editions(publisher);
+            CREATE INDEX IF NOT EXISTS idx_publisher_aliases_publisher ON publisher_aliases(publisher_id);
+            CREATE INDEX IF NOT EXISTS idx_copies_location ON copies(location);
+            CREATE INDEX IF NOT EXISTS idx_tags_parent ON tags(parent_id);
+            CREATE INDEX IF NOT EXISTS idx_work_tags_tag ON work_tags(tag_id);
+            """
+        )
+        work_columns = {row["name"] for row in connection.execute("PRAGMA table_info(works)")}
+        if "subtitle" not in work_columns:
+            connection.execute("ALTER TABLE works ADD COLUMN subtitle TEXT NOT NULL DEFAULT ''")
+        if "scripts" not in work_columns:
+            connection.execute("ALTER TABLE works ADD COLUMN scripts TEXT NOT NULL DEFAULT ''")
+        if "language" in work_columns:
+            connection.execute("UPDATE works SET scripts = language WHERE scripts = ''")
+
+        edition_columns = {row["name"] for row in connection.execute("PRAGMA table_info(editions)")}
+        if "version" not in edition_columns:
+            connection.execute("ALTER TABLE editions ADD COLUMN version TEXT NOT NULL DEFAULT ''")
+        if "identifier" not in edition_columns:
+            connection.execute("ALTER TABLE editions ADD COLUMN identifier TEXT NOT NULL DEFAULT ''")
+        if "isbn" in edition_columns:
+            connection.execute("UPDATE editions SET identifier = isbn WHERE identifier = ''")
+        if "other_title" not in edition_columns:
+            connection.execute("ALTER TABLE editions ADD COLUMN other_title TEXT NOT NULL DEFAULT ''")
+        if "translation_script" not in edition_columns:
+            connection.execute("ALTER TABLE editions ADD COLUMN translation_script TEXT NOT NULL DEFAULT ''")
+        if "translation_language" in edition_columns:
+            connection.execute(
+                "UPDATE editions SET translation_script = translation_language WHERE translation_script = ''"
+            )
+        if "publisher_id" not in edition_columns:
+            connection.execute("ALTER TABLE editions ADD COLUMN publisher_id INTEGER REFERENCES publishers(id) ON DELETE SET NULL")
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_editions_identifier ON editions(identifier)")
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_editions_publisher_id ON editions(publisher_id)")
+
+        raw_publishers = connection.execute(
+            "SELECT DISTINCT TRIM(publisher) AS name FROM editions WHERE TRIM(publisher) <> ''"
+        ).fetchall()
+        for raw in raw_publishers:
+            alias = connection.execute(
+                "SELECT publisher_id FROM publisher_aliases WHERE alias = ? COLLATE NOCASE",
+                (raw["name"],),
+            ).fetchone()
+            if alias:
+                publisher_id = alias["publisher_id"]
+            else:
+                connection.execute(
+                    "INSERT OR IGNORE INTO publishers (canonical_name) VALUES (?)", (raw["name"],)
+                )
+                publisher_id = connection.execute(
+                    "SELECT id FROM publishers WHERE canonical_name = ? COLLATE NOCASE",
+                    (raw["name"],),
+                ).fetchone()["id"]
+                connection.execute(
+                    "INSERT OR IGNORE INTO publisher_aliases (publisher_id, alias) VALUES (?, ?)",
+                    (publisher_id, raw["name"]),
+                )
+            connection.execute(
+                "UPDATE editions SET publisher_id = ? WHERE publisher = ? COLLATE NOCASE",
+                (publisher_id, raw["name"]),
+            )
+        copy_columns = {row["name"] for row in connection.execute("PRAGMA table_info(copies)")}
+        if "volume" not in copy_columns:
+            connection.execute("ALTER TABLE copies ADD COLUMN volume TEXT NOT NULL DEFAULT ''")
+        if "volume" in edition_columns:
+            connection.execute(
+                """UPDATE copies SET volume = COALESCE(
+                       (SELECT e.volume FROM editions e WHERE e.id = copies.edition_id), '')
+                   WHERE volume = ''"""
+            )
+            connection.execute("ALTER TABLE editions DROP COLUMN volume")
+        if "isbn" in edition_columns:
+            connection.execute("DROP INDEX IF EXISTS idx_editions_isbn")
+            connection.execute("ALTER TABLE editions DROP COLUMN isbn")
+        if "translation_language" in edition_columns:
+            connection.execute("ALTER TABLE editions DROP COLUMN translation_language")
+        if "language" in work_columns:
+            connection.execute("ALTER TABLE works DROP COLUMN language")
+
+        works = connection.execute(
+            "SELECT id, title, subtitle, authors, scripts FROM works ORDER BY id"
+        ).fetchall()
+        canonical_works: dict[tuple[str, str], int] = {}
+        for work in works:
+            key = (work["title"].strip().casefold(), work["authors"].strip().casefold())
+            canonical_id = canonical_works.get(key)
+            if canonical_id is None:
+                canonical_works[key] = work["id"]
+                connection.execute(
+                    "UPDATE works SET title = ?, subtitle = ?, authors = ?, scripts = ? WHERE id = ?",
+                    (
+                        work["title"].strip(), work["subtitle"].strip(),
+                        work["authors"].strip(), work["scripts"].strip(), work["id"],
+                    ),
+                )
+                continue
+            connection.execute(
+                """UPDATE works SET
+                       subtitle = CASE WHEN subtitle = '' THEN ? ELSE subtitle END,
+                       scripts = CASE WHEN scripts = '' THEN ? ELSE scripts END
+                   WHERE id = ?""",
+                (work["subtitle"].strip(), work["scripts"].strip(), canonical_id),
+            )
+            connection.execute(
+                "UPDATE editions SET work_id = ? WHERE work_id = ?",
+                (canonical_id, work["id"]),
+            )
+            connection.execute(
+                "INSERT OR IGNORE INTO work_tags (work_id, tag_id) SELECT ?, tag_id FROM work_tags WHERE work_id = ?",
+                (canonical_id, work["id"]),
+            )
+            connection.execute("DELETE FROM works WHERE id = ?", (work["id"],))
+
+        editions = connection.execute(
+            """SELECT id, work_id, identifier, translator, other_title, translated_title,
+                      translated_subtitle, translation_script, version, publisher, publisher_id,
+                      publication_year FROM editions ORDER BY id"""
+        ).fetchall()
+        canonical_editions: dict[tuple[object, ...], int] = {}
+        for edition in editions:
+            if edition["version"].strip():
+                key = (edition["work_id"], "version", edition["version"].strip().casefold())
+            else:
+                key = tuple(edition[column] for column in (
+                    "work_id", "identifier", "translator", "other_title", "translated_title",
+                    "translated_subtitle", "translation_script", "version", "publisher_id",
+                    "publication_year",
+                ))
+            canonical_id = canonical_editions.get(key)
+            if canonical_id is None:
+                canonical_editions[key] = edition["id"]
+                continue
+            connection.execute(
+                """UPDATE editions SET
+                       identifier = CASE WHEN identifier = '' THEN ? ELSE identifier END,
+                       translator = CASE WHEN translator = '' THEN ? ELSE translator END,
+                       other_title = CASE WHEN other_title = '' THEN ? ELSE other_title END,
+                       translated_title = CASE WHEN translated_title = '' THEN ? ELSE translated_title END,
+                       translated_subtitle = CASE WHEN translated_subtitle = '' THEN ? ELSE translated_subtitle END,
+                       translation_script = CASE WHEN translation_script = '' THEN ? ELSE translation_script END,
+                       publisher = CASE WHEN publisher = '' THEN ? ELSE publisher END,
+                       publisher_id = COALESCE(publisher_id, ?),
+                       publication_year = COALESCE(publication_year, ?)
+                   WHERE id = ?""",
+                (
+                    edition["identifier"], edition["translator"], edition["other_title"],
+                    edition["translated_title"], edition["translated_subtitle"],
+                    edition["translation_script"], edition["publisher"], edition["publisher_id"],
+                    edition["publication_year"], canonical_id,
+                ),
+            )
+            connection.execute(
+                "UPDATE copies SET edition_id = ? WHERE edition_id = ?",
+                (canonical_id, edition["id"]),
+            )
+            connection.execute("DELETE FROM editions WHERE id = ?", (edition["id"],))
