@@ -8,12 +8,14 @@ from pathlib import Path
 
 from app.database import connect, initialize
 from app.repository import (
-    add_publisher_alias, create_book, create_tag, get_book, get_work, list_books,
-    list_publishers, list_tags, list_works, update_book, update_copy_details,
+    create_book, create_tag, delete_copy, delete_edition, delete_publisher,
+    delete_tag, delete_work, get_book, get_work, list_books, list_publishers,
+    list_tags, list_works, normalize_publisher, update_book, update_copy_details,
     update_edition_details, update_tag, update_work_details,
 )
 from app.schemas import (
-    BookInput, CopyInput, EditionInput, PublisherAliasInput, TagInput, WorkInput,
+    BookInput, CopyInput, EditionInput,
+    PublisherNormalizationInput, TagInput, WorkInput,
 )
 
 
@@ -25,7 +27,7 @@ def sample_book(title: str = "百年孤寂") -> BookInput:
         ),
         edition=EditionInput(
             identifier="9789571375883", translator="葉淑吟", translated_title=title,
-            translation_script="中文", publisher="皇冠",
+            edition_scripts="中文", publisher="皇冠",
             publication_year=2018,
         ),
         copy=CopyInput(volume="1.2.3", acquisition_date=date(2024, 1, 3), location="書房 A 架", reading_record="已讀"),
@@ -86,9 +88,15 @@ class DatabaseMigrationTests(unittest.TestCase):
             initialize(path)
             migrated = get_book(1, path)
             assert migrated is not None
+            normalize_publisher(PublisherNormalizationInput(
+                canonical_name=migrated["edition"]["publisher"],
+                aliases=[migrated["edition"]["publisher"]],
+            ), path)
+            migrated = get_book(1, path)
+            assert migrated is not None
             self.assertEqual(migrated["work"]["scripts"], "藏文")
             self.assertEqual(migrated["edition"]["identifier"], "舊識別號")
-            self.assertEqual(migrated["edition"]["translation_script"], "漢文")
+            self.assertEqual(migrated["edition"]["edition_scripts"], "漢文")
             self.assertEqual(migrated["edition"]["publisher_canonical"], "舊出版社")
             connection = connect(path)
             try:
@@ -190,8 +198,8 @@ class RepositoryTests(unittest.TestCase):
         payload = BookInput.model_validate({
             "work": {"title": "只填題名", "authors": ""},
             "edition": {
-                "identifier": "", "translator": "", "other_title": "",
-                "translated_title": "", "translated_subtitle": "", "translation_script": "",
+                "identifier": "", "translator": "", "other_title": "", "other_subtitle": "",
+                "translated_title": "", "translated_subtitle": "", "edition_scripts": "",
                 "publisher": "", "publication_year": None,
             },
             "copy": {"acquisition_date": None, "location": "", "reading_record": ""},
@@ -319,14 +327,23 @@ class RepositoryTests(unittest.TestCase):
         first = sample_book("出版社測試一")
         first.edition.publisher = "西藏人民出版社"
         created = create_book(first, self.path)
-        publisher = list_publishers(self.path)[0]
-        add_publisher_alias(
-            publisher["id"], PublisherAliasInput(alias="བོད་ལྗོངས་མི་དམངས་དཔེ་སྐྲུན་ཁང་།"), self.path
-        )
+        normalize_publisher(PublisherNormalizationInput(
+            canonical_name=first.edition.publisher,
+            aliases=[first.edition.publisher],
+        ), self.path)
+        normalize_publisher(PublisherNormalizationInput(
+            canonical_name=first.edition.publisher,
+            aliases=[
+                first.edition.publisher,
+                "བོད་ལྗོངས་མི་དམངས་དཔེ་སྐྲུན་ཁང་།",
+            ],
+        ), self.path)
 
         second = sample_book("出版社測試二")
         second.edition.publisher = "བོད་ལྗོངས་མི་དམངས་དཔེ་སྐྲུན་ཁང་།"
         second_created = create_book(second, self.path)
+        created = get_book(created["id"], self.path)
+        assert created is not None
 
         self.assertEqual(len(list_publishers(self.path)), 1)
         self.assertEqual(second_created["edition"]["publisher"], second.edition.publisher)
@@ -342,6 +359,7 @@ class RepositoryTests(unittest.TestCase):
         book.work.scripts = "藏文、漢文"
         book.edition.identifier = "978-7-105-16925-2/I·3194（བོད 403）"
         book.edition.other_title = "Tibetan parallel title"
+        book.edition.other_subtitle = "A paired subtitle"
         book.edition.translated_title = "真正的翻譯題名"
         created = create_book(book, self.path)
 
@@ -349,6 +367,7 @@ class RepositoryTests(unittest.TestCase):
         self.assertEqual(created["work"]["scripts"], "藏文、漢文")
         self.assertEqual(created["edition"]["identifier"], book.edition.identifier)
         self.assertEqual(created["edition"]["other_title"], "Tibetan parallel title")
+        self.assertEqual(created["edition"]["other_subtitle"], "A paired subtitle")
         self.assertEqual(created["edition"]["translated_title"], "真正的翻譯題名")
         for term in ("副標題", "藏文", "བོད 403", "parallel title", "真正的翻譯題名"):
             with self.subTest(term=term):
@@ -405,6 +424,56 @@ class RepositoryTests(unittest.TestCase):
         self.assertEqual(updated["copy"]["location"], "客廳 B 架")
         self.assertEqual(get_book(9999, self.path), None)
 
+
+    def test_delete_operations_cover_every_managed_layer(self) -> None:
+        first = create_book(sample_book("Delete Copies"), self.path)
+        second = create_book(sample_book("Delete Copies"), self.path)
+        work_id = list_works(path=self.path)[0]["id"]
+
+        first_result = delete_copy(first["id"], self.path)
+        assert first_result is not None
+        self.assertFalse(first_result["edition_deleted"])
+        self.assertIsNotNone(get_work(work_id, self.path))
+
+        second_result = delete_copy(second["id"], self.path)
+        assert second_result is not None
+        self.assertTrue(second_result["edition_deleted"])
+        self.assertTrue(second_result["work_deleted"])
+        self.assertIsNone(get_work(work_id, self.path))
+
+        edition_book = create_book(sample_book("Delete Edition"), self.path)
+        edition_work = list_works("Delete Edition", self.path)[0]
+        edition_detail = get_work(edition_work["id"], self.path)
+        assert edition_detail is not None
+        edition_id = edition_detail["editions"][0]["id"]
+        edition_result = delete_edition(edition_id, self.path)
+        assert edition_result is not None
+        self.assertTrue(edition_result["work_deleted"])
+        self.assertIsNone(get_book(edition_book["id"], self.path))
+
+        work_book = create_book(sample_book("Delete Work"), self.path)
+        work_record = list_works("Delete Work", self.path)[0]
+        self.assertTrue(delete_work(work_record["id"], self.path))
+        self.assertIsNone(get_book(work_book["id"], self.path))
+
+        parent = create_tag(TagInput(name="Parent"), self.path)
+        child = create_tag(TagInput(name="Child", parent_id=parent["id"]), self.path)
+        tag_result = delete_tag(parent["id"], self.path)
+        assert tag_result is not None
+        self.assertEqual(tag_result["deleted_count"], 2)
+        self.assertNotIn(child["id"], [tag["id"] for tag in list_tags(self.path)])
+
+        publisher_book = sample_book("Delete Publisher")
+        publisher_book.edition.publisher = "Raw Press"
+        publisher_copy = create_book(publisher_book, self.path)
+        normalized = normalize_publisher(PublisherNormalizationInput(
+            canonical_name="Canonical Press", aliases=["Raw Press"]
+        ), self.path)
+        self.assertTrue(delete_publisher(normalized["id"], self.path))
+        preserved = get_book(publisher_copy["id"], self.path)
+        assert preserved is not None
+        self.assertEqual(preserved["edition"]["publisher"], "Raw Press")
+        self.assertEqual(preserved["edition"]["publisher_canonical"], "")
 
 if __name__ == "__main__":
     unittest.main()

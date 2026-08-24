@@ -67,10 +67,12 @@ def initialize(path: Path | None = None) -> None:
                 identifier TEXT NOT NULL DEFAULT '',
                 translator TEXT NOT NULL DEFAULT '',
                 other_title TEXT NOT NULL DEFAULT '',
+                other_subtitle TEXT NOT NULL DEFAULT '',
                 translated_title TEXT NOT NULL DEFAULT '',
                 translated_subtitle TEXT NOT NULL DEFAULT '',
-                translation_script TEXT NOT NULL DEFAULT '',
+                edition_scripts TEXT NOT NULL DEFAULT '',
                 version TEXT NOT NULL DEFAULT '',
+                series TEXT NOT NULL DEFAULT '',
                 publisher TEXT NOT NULL DEFAULT '',
                 publisher_id INTEGER REFERENCES publishers(id) ON DELETE SET NULL,
                 publication_year INTEGER,
@@ -124,43 +126,23 @@ def initialize(path: Path | None = None) -> None:
             connection.execute("UPDATE editions SET identifier = isbn WHERE identifier = ''")
         if "other_title" not in edition_columns:
             connection.execute("ALTER TABLE editions ADD COLUMN other_title TEXT NOT NULL DEFAULT ''")
-        if "translation_script" not in edition_columns:
-            connection.execute("ALTER TABLE editions ADD COLUMN translation_script TEXT NOT NULL DEFAULT ''")
+        if "other_subtitle" not in edition_columns:
+            connection.execute("ALTER TABLE editions ADD COLUMN other_subtitle TEXT NOT NULL DEFAULT ''")
+        if "edition_scripts" not in edition_columns:
+            connection.execute("ALTER TABLE editions ADD COLUMN edition_scripts TEXT NOT NULL DEFAULT ''")
+        if "translation_script" in edition_columns:
+            connection.execute(
+                "UPDATE editions SET edition_scripts = translation_script WHERE edition_scripts = ''"
+            )
         if "translation_language" in edition_columns:
             connection.execute(
-                "UPDATE editions SET translation_script = translation_language WHERE translation_script = ''"
+                "UPDATE editions SET edition_scripts = translation_language WHERE edition_scripts = ''"
             )
         if "publisher_id" not in edition_columns:
             connection.execute("ALTER TABLE editions ADD COLUMN publisher_id INTEGER REFERENCES publishers(id) ON DELETE SET NULL")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_editions_identifier ON editions(identifier)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_editions_publisher_id ON editions(publisher_id)")
 
-        raw_publishers = connection.execute(
-            "SELECT DISTINCT TRIM(publisher) AS name FROM editions WHERE TRIM(publisher) <> ''"
-        ).fetchall()
-        for raw in raw_publishers:
-            alias = connection.execute(
-                "SELECT publisher_id FROM publisher_aliases WHERE alias = ? COLLATE NOCASE",
-                (raw["name"],),
-            ).fetchone()
-            if alias:
-                publisher_id = alias["publisher_id"]
-            else:
-                connection.execute(
-                    "INSERT OR IGNORE INTO publishers (canonical_name) VALUES (?)", (raw["name"],)
-                )
-                publisher_id = connection.execute(
-                    "SELECT id FROM publishers WHERE canonical_name = ? COLLATE NOCASE",
-                    (raw["name"],),
-                ).fetchone()["id"]
-                connection.execute(
-                    "INSERT OR IGNORE INTO publisher_aliases (publisher_id, alias) VALUES (?, ?)",
-                    (publisher_id, raw["name"]),
-                )
-            connection.execute(
-                "UPDATE editions SET publisher_id = ? WHERE publisher = ? COLLATE NOCASE",
-                (publisher_id, raw["name"]),
-            )
         copy_columns = {row["name"] for row in connection.execute("PRAGMA table_info(copies)")}
         if "volume" not in copy_columns:
             connection.execute("ALTER TABLE copies ADD COLUMN volume TEXT NOT NULL DEFAULT ''")
@@ -178,6 +160,10 @@ def initialize(path: Path | None = None) -> None:
             connection.execute("ALTER TABLE editions DROP COLUMN translation_language")
         if "language" in work_columns:
             connection.execute("ALTER TABLE works DROP COLUMN language")
+
+        edition_columns = {row['name'] for row in connection.execute('PRAGMA table_info(editions)')}
+        if 'series' not in edition_columns:
+            connection.execute('ALTER TABLE editions ADD COLUMN series TEXT NOT NULL DEFAULT \'\'')
 
         works = connection.execute(
             "SELECT id, title, subtitle, authors, scripts FROM works ORDER BY id"
@@ -214,8 +200,8 @@ def initialize(path: Path | None = None) -> None:
             connection.execute("DELETE FROM works WHERE id = ?", (work["id"],))
 
         editions = connection.execute(
-            """SELECT id, work_id, identifier, translator, other_title, translated_title,
-                      translated_subtitle, translation_script, version, publisher, publisher_id,
+            """SELECT id, work_id, identifier, translator, other_title, other_subtitle, translated_title,
+                      translated_subtitle, edition_scripts, version, series, publisher, publisher_id,
                       publication_year FROM editions ORDER BY id"""
         ).fetchall()
         canonical_editions: dict[tuple[object, ...], int] = {}
@@ -224,8 +210,8 @@ def initialize(path: Path | None = None) -> None:
                 key = (edition["work_id"], "version", edition["version"].strip().casefold())
             else:
                 key = tuple(edition[column] for column in (
-                    "work_id", "identifier", "translator", "other_title", "translated_title",
-                    "translated_subtitle", "translation_script", "version", "publisher_id",
+                    "work_id", "identifier", "translator", "other_title", "other_subtitle", "translated_title",
+                    "translated_subtitle", "edition_scripts", "version", "series", "publisher_id",
                     "publication_year",
                 ))
             canonical_id = canonical_editions.get(key)
@@ -237,17 +223,20 @@ def initialize(path: Path | None = None) -> None:
                        identifier = CASE WHEN identifier = '' THEN ? ELSE identifier END,
                        translator = CASE WHEN translator = '' THEN ? ELSE translator END,
                        other_title = CASE WHEN other_title = '' THEN ? ELSE other_title END,
+                       other_subtitle = CASE WHEN other_subtitle = '' THEN ? ELSE other_subtitle END,
                        translated_title = CASE WHEN translated_title = '' THEN ? ELSE translated_title END,
                        translated_subtitle = CASE WHEN translated_subtitle = '' THEN ? ELSE translated_subtitle END,
-                       translation_script = CASE WHEN translation_script = '' THEN ? ELSE translation_script END,
+                       edition_scripts = CASE WHEN edition_scripts = '' THEN ? ELSE edition_scripts END,
+                       series = CASE WHEN series = '' THEN ? ELSE series END,
                        publisher = CASE WHEN publisher = '' THEN ? ELSE publisher END,
                        publisher_id = COALESCE(publisher_id, ?),
                        publication_year = COALESCE(publication_year, ?)
                    WHERE id = ?""",
                 (
-                    edition["identifier"], edition["translator"], edition["other_title"],
+                    edition["identifier"], edition["translator"], edition["other_title"], edition["other_subtitle"],
                     edition["translated_title"], edition["translated_subtitle"],
-                    edition["translation_script"], edition["publisher"], edition["publisher_id"],
+                    edition["edition_scripts"], edition["series"],
+                    edition["publisher"], edition["publisher_id"],
                     edition["publication_year"], canonical_id,
                 ),
             )

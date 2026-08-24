@@ -14,6 +14,7 @@
       <span><strong>紙上藏書</strong><small>我的紙質書庫</small></span>
     </a>
     <div class="top-actions">
+      <button class="secondary" id="import-button" type="button">導入 CSV</button>
       <button class="secondary" id="publishers-button" type="button">出版社</button>
       <button class="secondary" id="tags-button" type="button">標籤分類</button>
       <button class="primary" id="add-button" type="button">＋ 新增藏書</button>
@@ -67,7 +68,7 @@
       <fieldset>
         <legend><span>01</span> 作品信息</legend>
         <div class="fields two">
-          <label class="wide">題名 <em>必填</em><input name="work.title" required maxlength="500"></label>
+          <label class="wide">標題 <em>必填</em><input name="work.title" required maxlength="500"></label>
           <label class="wide">副標題<input name="work.subtitle" maxlength="500"></label>
           <label class="wide">作者或相關責任人<input name="work.authors" maxlength="1000" placeholder="記錄主要對應人物，多位可用、分隔"></label>
           <label>文種<input name="work.scripts" maxlength="500" placeholder="例如：藏文、漢文"></label>
@@ -79,16 +80,22 @@
       <fieldset>
         <legend><span>02</span> 版本信息</legend>
         <div class="fields two">
-          <label class="wide">ISBN／識別號<input name="edition.identifier" maxlength="1000" placeholder="可完整保留出版社編號、民族文字標識等"></label>
+          <label class="wide">識別號<input name="edition.identifier" maxlength="1000" placeholder="可完整保留 ISBN、出版社編號、民族文字標識等"></label>
           <label>版本<input name="edition.version" maxlength="200" placeholder="例如：第 2 版、修訂版"></label>
+          <label>系列<input name="edition.series" maxlength="500" placeholder="本書所屬系列"></label>
           <label>卷冊<input name="copy.volume" maxlength="100" placeholder="例如：1.2.3"></label>
           <label>出版社原始名稱<input name="edition.publisher" maxlength="500" list="publisher-suggestions"></label>
           <datalist id="publisher-suggestions"></datalist>
           <label>出版年份<input name="edition.publication_year" type="number" min="0" max="9999" inputmode="numeric"></label>
+          <label>文種<input name="edition.edition_scripts" maxlength="500" placeholder="留空時繼承作品文種"></label>
           <label>譯者或相關責任人<input name="edition.translator" maxlength="500"></label>
-          <label>譯本文種<input name="edition.translation_script" maxlength="500" placeholder="例如：藏文、漢文"></label>
-          <label class="wide">其他題名<input name="edition.other_title" maxlength="1000" placeholder="並列題名、不同文字題名或出版附帶題名"></label>
-          <label class="wide">翻譯題名<input name="edition.translated_title" maxlength="500"></label>
+          <div class="wide paired-title-editor" data-paired-titles
+               data-title-name="edition.other_title" data-subtitle-name="edition.other_subtitle">
+            <span class="field-label">其他標題</span>
+            <div class="paired-title-rows"></div>
+            <button class="repeatable-add" type="button" data-add-title-pair>＋ 新增其他標題</button>
+          </div>
+          <label class="wide">翻譯標題<input name="edition.translated_title" maxlength="500"></label>
           <label class="wide">翻譯副標題<input name="edition.translated_subtitle" maxlength="500"></label>
         </div>
       </fieldset>
@@ -142,6 +149,7 @@
     <div id="detail-content"></div>
     <div class="dialog-actions">
       <button class="secondary" type="button" data-detail-close>關閉</button>
+      <button class="danger" type="button" id="delete-work-button">&#21034;&#38500;&#20316;&#21697;</button>
       <button class="secondary" type="button" id="edit-work-button">修改作品</button>
       <button class="primary" type="button" id="add-work-copy-button">＋ 新增版本或實物冊</button>
     </div>
@@ -151,7 +159,7 @@
     <form id="work-edit-form">
       <div class="dialog-header"><div><p class="eyebrow">EDIT WORK</p><h2>修改作品</h2></div><button class="icon-button" type="button" data-work-edit-close>×</button></div>
       <fieldset><div class="fields two">
-        <label class="wide">題名 <em>必填</em><input name="title" required maxlength="500"></label>
+        <label class="wide">標題 <em>必填</em><input name="title" required maxlength="500"></label>
         <label class="wide">副標題<input name="subtitle" maxlength="500"></label>
         <label class="wide">作者或相關責任人<input name="authors" maxlength="1000"></label>
         <label>文種<input name="scripts" maxlength="500"></label>
@@ -166,13 +174,19 @@
       <div class="dialog-header"><div><p class="eyebrow">EDIT EDITION</p><h2>修改版本</h2></div><button class="icon-button" type="button" data-edition-edit-close>×</button></div>
       <fieldset><div class="fields two">
         <label>版本<input name="version" maxlength="200"></label>
-        <label class="wide">ISBN／識別號<input name="identifier" maxlength="1000"></label>
+        <label class="wide">識別號<input name="identifier" maxlength="1000"></label>
+        <label>系列<input name="series" maxlength="500"></label>
         <label>出版社原始名稱<input name="publisher" maxlength="500" list="publisher-suggestions"></label>
         <label>出版年份<input name="publication_year" type="number" min="0" max="9999"></label>
+        <label>文種<input name="edition_scripts" maxlength="500" placeholder="留空時繼承作品文種"></label>
         <label>譯者或相關責任人<input name="translator" maxlength="500"></label>
-        <label>譯本文種<input name="translation_script" maxlength="500"></label>
-        <label class="wide">其他題名<input name="other_title" maxlength="1000"></label>
-        <label class="wide">翻譯題名<input name="translated_title" maxlength="500"></label>
+        <div class="wide paired-title-editor" data-paired-titles
+             data-title-name="other_title" data-subtitle-name="other_subtitle">
+          <span class="field-label">其他標題</span>
+          <div class="paired-title-rows"></div>
+          <button class="repeatable-add" type="button" data-add-title-pair>＋ 新增其他標題</button>
+        </div>
+        <label class="wide">翻譯標題<input name="translated_title" maxlength="500"></label>
         <label class="wide">翻譯副標題<input name="translated_subtitle" maxlength="500"></label>
       </div></fieldset>
       <div class="dialog-actions"><button class="secondary" type="button" data-edition-edit-close>取消</button><button class="primary" type="submit">保存版本</button></div>
@@ -200,6 +214,7 @@
     <div id="copy-detail-content"></div>
     <div class="dialog-actions">
       <button class="secondary" type="button" data-copy-close>關閉</button>
+      <button class="danger" type="button" id="delete-copy-button">&#21034;&#38500;&#23526;&#29289;&#20874;</button>
       <button class="primary" type="button" id="edit-copy-button">修改資料</button>
     </div>
   </dialog>
@@ -210,15 +225,35 @@
       <button class="icon-button" aria-label="關閉" type="button" data-publishers-close>×</button>
     </div>
     <section class="tag-manager">
-      <p>錄入時會自動識別已有別名；未知名稱會先建立為獨立出版社。可在此把另一名稱關聯到同一實體。</p>
-      <form id="publisher-alias-form" class="tag-create-form">
-        <label>歸入出版社<select id="publisher-target" required></select></label>
-        <label>新增或合併別名<input id="publisher-alias" required maxlength="500" placeholder="輸入另一文字或語言的名稱"></label>
-        <button class="primary" type="submit">建立關聯</button>
+      <p>出版物上的名稱會原樣保留。請由你指定正規名稱，再把已有名稱關聯到它。</p>
+      <form id="publisher-normalize-form" class="tag-create-form">
+        <label>正規名稱<input id="publisher-canonical-name" required maxlength="500" placeholder="由你決定統一顯示的名稱"></label>
+        <div class="publisher-name-field">
+          <span class="field-label">關聯已有名稱</span>
+          <div id="publisher-existing-names" class="publisher-name-options"></div>
+        </div>
+        <button class="primary" type="submit">建立或更新正規化</button>
       </form>
       <div id="publisher-list" class="publisher-list"></div>
     </section>
     <div class="dialog-actions"><button class="secondary" type="button" data-publishers-close>完成</button></div>
+  </dialog>
+
+  <input id="csv-file-input" type="file" accept=".csv,text/csv" hidden>
+  <dialog id="import-dialog" class="dialog import-dialog">
+    <div class="dialog-header">
+      <div><p class="eyebrow">IMPORT CSV</p><h2>導入藏書資料</h2></div>
+      <button class="icon-button" aria-label="關閉" type="button" data-import-close>×</button>
+    </div>
+    <section class="import-content">
+      <p id="import-summary">正在讀取 CSV……</p>
+      <label class="import-select-all"><input id="import-select-all" type="checkbox" checked> 全部保留並導入</label>
+      <div id="import-preview"></div>
+    </section>
+    <div class="dialog-actions">
+      <button class="secondary" type="button" data-import-close>取消</button>
+      <button class="primary" id="import-confirm" type="button" disabled>確認導入</button>
+    </div>
   </dialog>
 
   <script src="/static/app.js?v=0.5.1" defer></script>
