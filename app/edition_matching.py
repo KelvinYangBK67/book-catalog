@@ -39,7 +39,9 @@ def editions_match(left: Any, right: Any) -> bool:
     if left_identifiers and right_identifiers:
         return bool(left_identifiers & right_identifiers)
     return (
-        _text(_value(left, "version")) == _text(_value(right, "version"))
+        _text(_value(left, "title")) == _text(_value(right, "title"))
+        and _text(_value(left, "subtitle")) == _text(_value(right, "subtitle"))
+        and _text(_value(left, "version")) == _text(_value(right, "version"))
         and publisher_identity(left) == publisher_identity(right)
         and _value(left, "publication_year") == _value(right, "publication_year")
         and _text(_value(left, "series")) == _text(_value(right, "series"))

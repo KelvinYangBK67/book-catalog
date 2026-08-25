@@ -39,10 +39,10 @@ def export_json() -> Response:
 def export_csv() -> Response:
     fields = [
         'copy_id', 'title', 'subtitle', 'authors', 'scripts', 'tags',
-        'identifier', 'version', 'series', 'translator', 'other_title', 'other_subtitle',
+        'edition_title', 'edition_subtitle', 'work_ids', 'work_relations', 'identifier', 'version', 'series', 'translator', 'other_title', 'other_subtitle',
         'translated_title', 'translated_subtitle', 'edition_scripts',
         'publisher', 'publisher_canonical', 'publication_year',
-        'volume', 'acquisition_date', 'location', 'reading_record',
+        'volume_number', 'volume_title', 'acquisition_date', 'location', 'reading_record',
     ]
     output = StringIO(newline='')
     writer = csv.DictWriter(output, fieldnames=fields)
@@ -55,6 +55,11 @@ def export_csv() -> Response:
             'copy_id': record['id'], 'title': work['title'],
             'subtitle': work['subtitle'], 'authors': work['authors'],
             'scripts': work['scripts'], 'tags': '; '.join(work['tag_names']),
+            'edition_title': edition['title'], 'edition_subtitle': edition['subtitle'],
+            'work_ids': '; '.join(str(work_id) for work_id in edition['work_ids']),
+            'work_relations': json.dumps(
+                edition.get('work_relations', []), ensure_ascii=False, separators=(',', ':')
+            ),
             'identifier': edition['identifier'], 'version': edition['version'],
             'series': edition['series'],
             'translator': edition['translator'], 'other_title': edition['other_title'],
@@ -65,7 +70,8 @@ def export_csv() -> Response:
             'publisher': edition['publisher'],
             'publisher_canonical': edition['publisher_canonical'],
             'publication_year': edition['publication_year'],
-            'volume': copy['volume'], 'acquisition_date': copy['acquisition_date'],
+            'volume_number': copy['volume_number'], 'volume_title': copy['volume_title'],
+            'acquisition_date': copy['acquisition_date'],
             'location': copy['location'], 'reading_record': copy['reading_record'],
         })
     return Response(

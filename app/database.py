@@ -66,6 +66,8 @@ def initialize(path: Path | None = None) -> None:
             CREATE TABLE IF NOT EXISTS editions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 work_id INTEGER NOT NULL REFERENCES works(id) ON DELETE CASCADE,
+                title TEXT NOT NULL DEFAULT '',
+                subtitle TEXT NOT NULL DEFAULT '',
                 identifier TEXT NOT NULL DEFAULT '',
                 translator TEXT NOT NULL DEFAULT '',
                 other_title TEXT NOT NULL DEFAULT '',
@@ -81,10 +83,22 @@ def initialize(path: Path | None = None) -> None:
                 CHECK (publication_year IS NULL OR publication_year BETWEEN 0 AND 9999)
             );
 
+            CREATE TABLE IF NOT EXISTS edition_works (
+                edition_id INTEGER NOT NULL REFERENCES editions(id) ON DELETE CASCADE,
+                work_id INTEGER NOT NULL REFERENCES works(id) ON DELETE CASCADE,
+                position INTEGER NOT NULL DEFAULT 0,
+                relation_type TEXT NOT NULL DEFAULT 'contained'
+                    CHECK (relation_type IN ('volume', 'contained')),
+                volume_number TEXT NOT NULL DEFAULT '',
+                PRIMARY KEY (edition_id, work_id),
+                UNIQUE (edition_id, position)
+            );
+
             CREATE TABLE IF NOT EXISTS copies (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 edition_id INTEGER NOT NULL REFERENCES editions(id) ON DELETE CASCADE,
-                volume TEXT NOT NULL DEFAULT '',
+                volume_number TEXT NOT NULL DEFAULT '',
+                volume_title TEXT NOT NULL DEFAULT '',
                 acquisition_date TEXT,
                 location TEXT NOT NULL DEFAULT '',
                 reading_record TEXT NOT NULL DEFAULT ''
@@ -104,6 +118,7 @@ def initialize(path: Path | None = None) -> None:
             );
 
             CREATE INDEX IF NOT EXISTS idx_works_title ON works(title);
+            CREATE INDEX IF NOT EXISTS idx_edition_works_work ON edition_works(work_id, position);
             CREATE INDEX IF NOT EXISTS idx_editions_publisher ON editions(publisher);
             CREATE INDEX IF NOT EXISTS idx_publisher_aliases_publisher ON publisher_aliases(publisher_id);
             CREATE INDEX IF NOT EXISTS idx_copies_location ON copies(location);
@@ -120,6 +135,10 @@ def initialize(path: Path | None = None) -> None:
             connection.execute("UPDATE works SET scripts = language WHERE scripts = ''")
 
         edition_columns = {row["name"] for row in connection.execute("PRAGMA table_info(editions)")}
+        if "title" not in edition_columns:
+            connection.execute("ALTER TABLE editions ADD COLUMN title TEXT NOT NULL DEFAULT ''")
+        if "subtitle" not in edition_columns:
+            connection.execute("ALTER TABLE editions ADD COLUMN subtitle TEXT NOT NULL DEFAULT ''")
         if "version" not in edition_columns:
             connection.execute("ALTER TABLE editions ADD COLUMN version TEXT NOT NULL DEFAULT ''")
         if "identifier" not in edition_columns:
@@ -146,13 +165,17 @@ def initialize(path: Path | None = None) -> None:
         connection.execute("CREATE INDEX IF NOT EXISTS idx_editions_publisher_id ON editions(publisher_id)")
 
         copy_columns = {row["name"] for row in connection.execute("PRAGMA table_info(copies)")}
-        if "volume" not in copy_columns:
-            connection.execute("ALTER TABLE copies ADD COLUMN volume TEXT NOT NULL DEFAULT ''")
+        if "volume_number" not in copy_columns:
+            connection.execute("ALTER TABLE copies ADD COLUMN volume_number TEXT NOT NULL DEFAULT ''")
+        if "volume_title" not in copy_columns:
+            connection.execute("ALTER TABLE copies ADD COLUMN volume_title TEXT NOT NULL DEFAULT ''")
+        if "volume" in copy_columns:
+            connection.execute("UPDATE copies SET volume_number = volume WHERE volume_number = ''")
         if "volume" in edition_columns:
             connection.execute(
-                """UPDATE copies SET volume = COALESCE(
+                """UPDATE copies SET volume_number = COALESCE(
                        (SELECT e.volume FROM editions e WHERE e.id = copies.edition_id), '')
-                   WHERE volume = ''"""
+                   WHERE volume_number = ''"""
             )
             connection.execute("ALTER TABLE editions DROP COLUMN volume")
         if "isbn" in edition_columns:
@@ -166,6 +189,24 @@ def initialize(path: Path | None = None) -> None:
         edition_columns = {row['name'] for row in connection.execute('PRAGMA table_info(editions)')}
         if 'series' not in edition_columns:
             connection.execute('ALTER TABLE editions ADD COLUMN series TEXT NOT NULL DEFAULT \'\'')
+
+        edition_work_columns = {
+            row["name"] for row in connection.execute("PRAGMA table_info(edition_works)")
+        }
+        if "relation_type" not in edition_work_columns:
+            connection.execute(
+                "ALTER TABLE edition_works ADD COLUMN relation_type TEXT NOT NULL DEFAULT 'contained' "
+                "CHECK (relation_type IN ('volume', 'contained'))"
+            )
+        if "volume_number" not in edition_work_columns:
+            connection.execute(
+                "ALTER TABLE edition_works ADD COLUMN volume_number TEXT NOT NULL DEFAULT ''"
+            )
+
+        connection.execute(
+            """INSERT OR IGNORE INTO edition_works (edition_id, work_id, position)
+               SELECT id, work_id, 0 FROM editions"""
+        )
 
         works = connection.execute(
             "SELECT id, title, subtitle, authors, scripts FROM works ORDER BY id"
@@ -191,6 +232,24 @@ def initialize(path: Path | None = None) -> None:
                    WHERE id = ?""",
                 (work["subtitle"].strip(), work["scripts"].strip(), canonical_id),
             )
+            for link in connection.execute(
+                "SELECT edition_id FROM edition_works WHERE work_id = ? ORDER BY edition_id",
+                (work["id"],),
+            ).fetchall():
+                existing_link = connection.execute(
+                    "SELECT 1 FROM edition_works WHERE edition_id = ? AND work_id = ?",
+                    (link["edition_id"], canonical_id),
+                ).fetchone()
+                if existing_link:
+                    connection.execute(
+                        "DELETE FROM edition_works WHERE edition_id = ? AND work_id = ?",
+                        (link["edition_id"], work["id"]),
+                    )
+                else:
+                    connection.execute(
+                        "UPDATE edition_works SET work_id = ? WHERE edition_id = ? AND work_id = ?",
+                        (canonical_id, link["edition_id"], work["id"]),
+                    )
             connection.execute(
                 "UPDATE editions SET work_id = ? WHERE work_id = ?",
                 (canonical_id, work["id"]),
@@ -202,8 +261,8 @@ def initialize(path: Path | None = None) -> None:
             connection.execute("DELETE FROM works WHERE id = ?", (work["id"],))
 
         editions = connection.execute(
-            """SELECT id, work_id, identifier, translator, other_title, other_subtitle, translated_title,
-                      translated_subtitle, edition_scripts, version, series, publisher, publisher_id,
+            """SELECT id, work_id, title, subtitle, identifier, translator, other_title, other_subtitle,
+                      translated_title, translated_subtitle, edition_scripts, version, series, publisher, publisher_id,
                       publication_year FROM editions ORDER BY id"""
         ).fetchall()
         canonical_editions: dict[int, list[sqlite3.Row]] = {}
@@ -216,6 +275,8 @@ def initialize(path: Path | None = None) -> None:
             canonical_id = canonical["id"]
             connection.execute(
                 """UPDATE editions SET
+                       title = CASE WHEN title = '' THEN ? ELSE title END,
+                       subtitle = CASE WHEN subtitle = '' THEN ? ELSE subtitle END,
                        identifier = CASE WHEN identifier = '' THEN ? ELSE identifier END,
                        translator = CASE WHEN translator = '' THEN ? ELSE translator END,
                        other_title = CASE WHEN other_title = '' THEN ? ELSE other_title END,
@@ -229,6 +290,7 @@ def initialize(path: Path | None = None) -> None:
                        publication_year = COALESCE(publication_year, ?)
                    WHERE id = ?""",
                 (
+                    edition["title"], edition["subtitle"],
                     edition["identifier"], edition["translator"], edition["other_title"], edition["other_subtitle"],
                     edition["translated_title"], edition["translated_subtitle"],
                     edition["edition_scripts"], edition["series"],
@@ -236,6 +298,29 @@ def initialize(path: Path | None = None) -> None:
                     edition["publication_year"], canonical_id,
                 ),
             )
+            for link in connection.execute(
+                """SELECT work_id, relation_type, volume_number
+                   FROM edition_works WHERE edition_id = ? ORDER BY position""",
+                (edition["id"],),
+            ).fetchall():
+                if connection.execute(
+                    "SELECT 1 FROM edition_works WHERE edition_id = ? AND work_id = ?",
+                    (canonical_id, link["work_id"]),
+                ).fetchone():
+                    continue
+                position = connection.execute(
+                    "SELECT COALESCE(MAX(position), -1) + 1 FROM edition_works WHERE edition_id = ?",
+                    (canonical_id,),
+                ).fetchone()[0]
+                connection.execute(
+                    """INSERT INTO edition_works
+                           (edition_id, work_id, position, relation_type, volume_number)
+                       VALUES (?, ?, ?, ?, ?)""",
+                    (
+                        canonical_id, link["work_id"], position,
+                        link["relation_type"], link["volume_number"],
+                    ),
+                )
             connection.execute(
                 "UPDATE copies SET edition_id = ? WHERE edition_id = ?",
                 (canonical_id, edition["id"]),

@@ -109,7 +109,7 @@ class ImportAndNormalizationTests(unittest.TestCase):
         self.assertEqual(len({book['work']['title'] for book in books}), 1)
         self.assertEqual(len({book['edition']['version'] for book in books}), 1)
         self.assertEqual(
-            {book['copy']['volume'] for book in books},
+            {book['copy']['volume_number'] for book in books},
             {'1', '2', '3'},
         )
 
@@ -161,3 +161,41 @@ class ImportAndNormalizationTests(unittest.TestCase):
         self.assertEqual(len(books), 1)
         self.assertEqual(books[0]['copy']['location'], 'New Shelf')
         self.assertEqual(books[0]['copy']['reading_record'], 'Replaced')
+
+
+    def test_csv_present_empty_fields_clear_values_and_absent_fields_are_preserved(self) -> None:
+        original = create_book(BookInput(
+            work=WorkInput(
+                title='Clearable', subtitle='Old subtitle', authors='Author', scripts='Tibetan',
+                tag_names=['Old tag'],
+            ),
+            edition=EditionInput(
+                identifier='ISBN 123', translator='Translator', series='Series',
+                publisher='Press', publication_year=2020,
+            ),
+            copy=CopyInput(volume='1', location='Old shelf', reading_record='Read'),
+        ))
+        rows = preview_csv(
+            b'title,authors,subtitle,tags,identifier,series,location\n'
+            b'Clearable,Author,,,,,New shelf\n'
+        )
+
+        csv_import(CsvImportCommit(rows=[CsvImportSelection(
+            row_number=rows[0]['row_number'],
+            book=BookInput.model_validate(rows[0]['book']),
+            csv_fields=rows[0]['csv_fields'],
+            action='replace',
+            target_copy_id=original['id'],
+        )]))
+
+        book = list_books()[0]
+        self.assertEqual(book['work']['subtitle'], '')
+        self.assertEqual(book['work']['scripts'], 'Tibetan')
+        self.assertEqual(book['work']['tag_ids'], [])
+        self.assertEqual(book['edition']['identifier'], '')
+        self.assertEqual(book['edition']['series'], '')
+        self.assertEqual(book['edition']['translator'], 'Translator')
+        self.assertEqual(book['edition']['publisher'], 'Press')
+        self.assertEqual(book['edition']['publication_year'], 2020)
+        self.assertEqual(book['copy']['location'], 'New shelf')
+        self.assertEqual(book['copy']['reading_record'], 'Read')

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import date
 import re
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -81,6 +82,18 @@ class CleanModel(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True)
 
 
+class WorkEditionRelation(CleanModel):
+    edition_id: int
+    relation_type: Literal["volume", "contained"] = "contained"
+    volume_number: str = Field(default="", max_length=100)
+
+    @model_validator(mode="after")
+    def volume_number_only_applies_to_volumes(self) -> "WorkEditionRelation":
+        if self.relation_type == "contained":
+            self.volume_number = ""
+        return self
+
+
 class WorkInput(CleanModel):
     title: str = Field(min_length=1, max_length=500)
     subtitle: str = Field(default="", max_length=500)
@@ -88,6 +101,7 @@ class WorkInput(CleanModel):
     scripts: str = Field(default="", max_length=500)
     tag_ids: list[int] = Field(default_factory=list)
     tag_names: list[str] = Field(default_factory=list)
+    edition_relations: list[WorkEditionRelation] | None = Field(default=None, max_length=200)
 
     @field_validator('authors', 'scripts', mode='before')
     @classmethod
@@ -106,7 +120,23 @@ class WorkInput(CleanModel):
         ]
 
 
+class EditionWorkRelation(CleanModel):
+    work_id: int
+    relation_type: Literal["volume", "contained"] = "contained"
+    volume_number: str = Field(default="", max_length=100)
+
+    @model_validator(mode="after")
+    def volume_number_only_applies_to_volumes(self) -> "EditionWorkRelation":
+        if self.relation_type == "contained":
+            self.volume_number = ""
+        return self
+
+
 class EditionInput(CleanModel):
+    title: str = Field(default="", max_length=500)
+    subtitle: str = Field(default="", max_length=500)
+    work_ids: list[int] = Field(default_factory=list, max_length=200)
+    work_relations: list[EditionWorkRelation] = Field(default_factory=list, max_length=200)
     identifier: str = Field(default="", max_length=1000)
     translator: str = Field(default="", max_length=500)
     other_title: str = Field(default="", max_length=1000)
@@ -120,6 +150,13 @@ class EditionInput(CleanModel):
     publisher_canonical: str = ""
     publication_year: int | None = Field(default=None, ge=0, le=9999)
     series: str = Field(default='', max_length=500)
+
+    @field_validator("work_ids", mode="before")
+    @classmethod
+    def normalize_work_ids(cls, value: object) -> object:
+        if isinstance(value, str):
+            value = normalize_semicolon_text(value).split("; ")
+        return list(dict.fromkeys(int(item) for item in (value or []) if str(item).strip()))
 
     @model_validator(mode='before')
     @classmethod
@@ -153,10 +190,20 @@ class EditionInput(CleanModel):
 
 
 class CopyInput(CleanModel):
-    volume: str = Field(default="", max_length=100)
+    volume_number: str = Field(default="", max_length=100)
+    volume_title: str = Field(default="", max_length=500)
     acquisition_date: date | None = None
     location: str = Field(default="", max_length=500)
     reading_record: str = Field(default="", max_length=5000)
+
+
+    @model_validator(mode="before")
+    @classmethod
+    def accept_legacy_volume(cls, value: object) -> object:
+        if isinstance(value, dict) and "volume_number" not in value and "volume" in value:
+            value = dict(value)
+            value["volume_number"] = value["volume"]
+        return value
 
     @field_validator("acquisition_date", mode="before")
     @classmethod
@@ -176,20 +223,37 @@ class BookBatchInput(BaseModel):
     work: WorkInput
     edition: EditionInput
     copy_: CopyInput = Field(alias="copy")
-    volumes: list[str] = Field(min_length=1, max_length=500)
+    volume_numbers: list[str] = Field(min_length=1, max_length=500)
+    volume_titles: list[str] = Field(default_factory=list, max_length=500)
 
-    @field_validator("volumes", mode="before")
+    @model_validator(mode="before")
     @classmethod
-    def normalize_volumes(cls, value: object) -> object:
+    def accept_legacy_volumes(cls, value: object) -> object:
+        if isinstance(value, dict) and "volume_numbers" not in value and "volumes" in value:
+            value = dict(value)
+            value["volume_numbers"] = value["volumes"]
+        return value
+
+    @field_validator("volume_numbers", mode="before")
+    @classmethod
+    def normalize_volume_numbers(cls, value: object) -> object:
         if isinstance(value, str):
             value = normalize_semicolon_text(value).split("; ")
         return [str(item).strip() for item in (value or []) if str(item).strip()]
+
+    @field_validator("volume_titles", mode="before")
+    @classmethod
+    def normalize_volume_titles(cls, value: object) -> object:
+        if isinstance(value, str):
+            value = normalize_semicolon_slots(value).split("; ")
+        return [str(item).strip() for item in (value or [])]
 
 
 class BookRecord(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
     id: int
+    edition_id: int
     work: WorkInput
     edition: EditionInput
     copy_: CopyInput = Field(alias="copy")
@@ -197,7 +261,8 @@ class BookRecord(BaseModel):
 
 class CopySummary(BaseModel):
     id: int
-    volume: str
+    volume_number: str
+    volume_title: str
     location: str
 
 
@@ -205,6 +270,24 @@ class EditionGroup(BaseModel):
     id: int
     edition: EditionInput
     copies: list[CopySummary]
+
+
+class EditionSummary(BaseModel):
+    id: int
+    title: str
+    subtitle: str
+    translated_title: str
+    translated_subtitle: str
+    identifier: str
+    publisher: str
+    publisher_canonical: str
+    publication_year: int | None
+    version: str
+    series: str
+    edition_scripts: str
+    work_ids: list[int]
+    work_relations: list[EditionWorkRelation]
+    copy_count: int
 
 
 class TagInput(CleanModel):

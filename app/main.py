@@ -13,14 +13,14 @@ from .database import initialize
 from .export import router as export_router
 from .import_csv import router as import_router
 from .repository import (
-    create_book, create_books_batch, create_tag, delete_copy, delete_edition, delete_publisher,
-    delete_tag, delete_work, get_book, get_work, list_books,
+    create_book, create_books_batch, create_tag, create_work_record, delete_copy, delete_edition, delete_publisher,
+    delete_tag, delete_work, get_book, get_work, list_books, list_editions,
     list_publisher_names, list_publishers, list_tag_violations, list_tags, list_works, normalize_publisher,
     update_book, update_copy_details,
     update_edition_details, update_tag, update_work_details,
 )
 from .schemas import (
-    BookBatchInput, BookInput, BookRecord, CopyInput, EditionInput,
+    BookBatchInput, BookInput, BookRecord, CopyInput, EditionInput, EditionSummary,
     PublisherNormalizationInput, PublisherRecord, TagInput, TagRecord,
     WorkDetail, WorkInput, WorkSummary,
 )
@@ -40,7 +40,7 @@ async def lifespan(_: FastAPI):
     yield
 
 
-app = FastAPI(title="紙質書管理系統", version="0.5.2", lifespan=lifespan)
+app = FastAPI(title="紙質書管理系統", version="0.6.0", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=STATIC), name="static")
 app.include_router(export_router)
 app.include_router(import_router)
@@ -52,7 +52,7 @@ if IMPE_FONTS.is_dir():
 def index() -> HTMLResponse:
     html = (STATIC / "index.html").read_text(encoding="utf-8")
     if not IMPE_FONTS.is_dir():
-        html = html.replace('  <link rel="stylesheet" href="/static/fonts.css?v=1.0.2">\n', "")
+        html = html.replace('  <link rel="stylesheet" href="/static/fonts.css?v=1.0.4">\n', "")
     return HTMLResponse(html, headers={"Cache-Control": "no-cache"})
 
 
@@ -64,6 +64,19 @@ def books(q: str = Query(default="", max_length=500)) -> list[dict]:
 @app.get("/api/works", response_model=list[WorkSummary])
 def works(q: str = Query(default="", max_length=500)) -> list[dict]:
     return list_works(q)
+
+
+@app.get("/api/editions", response_model=list[EditionSummary])
+def editions(q: str = Query(default="", max_length=500)) -> list[dict]:
+    return list_editions(q)
+
+
+@app.post("/api/works", response_model=WorkDetail, status_code=status.HTTP_201_CREATED)
+def add_work(payload: WorkInput) -> dict:
+    try:
+        return create_work_record(payload)
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
 
 
 @app.get("/api/works/{work_id}", response_model=WorkDetail)
