@@ -6,6 +6,8 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
 
+from .edition_matching import find_matching_edition
+
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_DATABASE = PROJECT_ROOT / "data" / "library.db"
@@ -204,20 +206,14 @@ def initialize(path: Path | None = None) -> None:
                       translated_subtitle, edition_scripts, version, series, publisher, publisher_id,
                       publication_year FROM editions ORDER BY id"""
         ).fetchall()
-        canonical_editions: dict[tuple[object, ...], int] = {}
+        canonical_editions: dict[int, list[sqlite3.Row]] = {}
         for edition in editions:
-            if edition["version"].strip():
-                key = (edition["work_id"], "version", edition["version"].strip().casefold())
-            else:
-                key = tuple(edition[column] for column in (
-                    "work_id", "identifier", "translator", "other_title", "other_subtitle", "translated_title",
-                    "translated_subtitle", "edition_scripts", "version", "series", "publisher_id",
-                    "publication_year",
-                ))
-            canonical_id = canonical_editions.get(key)
-            if canonical_id is None:
-                canonical_editions[key] = edition["id"]
+            candidates = canonical_editions.setdefault(edition["work_id"], [])
+            canonical = find_matching_edition(candidates, edition)
+            if canonical is None:
+                candidates.append(edition)
                 continue
+            canonical_id = canonical["id"]
             connection.execute(
                 """UPDATE editions SET
                        identifier = CASE WHEN identifier = '' THEN ? ELSE identifier END,

@@ -16,12 +16,13 @@ from app.schemas import BookInput, CopyInput, EditionInput, TagInput, WorkInput
 class ListNormalizationTests(unittest.TestCase):
     def test_semicolon_lists_and_numeric_versions_are_normalized(self) -> None:
         work = WorkInput(
-            title='Test', authors='One;  Two', scripts='Latin; Chinese',
-            tag_names='Buddhism; Tibet',
+            title='Test', authors='One；  Two', scripts='Latin、 Chinese',
+            tag_names='Buddhism， Tibet',
         )
         edition = EditionInput(
-            version='2; Revised; 3',
-            translator='First; Second',
+            version='2； Revised、 3',
+            translator='First， Second', other_title='；Parallel',
+            other_subtitle='Subtitle；',
         )
 
         self.assertEqual(work.authors, 'One; Two')
@@ -29,6 +30,8 @@ class ListNormalizationTests(unittest.TestCase):
         self.assertEqual(work.tag_names, ['Buddhism', 'Tibet'])
         self.assertEqual(edition.version, '第2版; Revised; 第3版')
         self.assertEqual(edition.translator, 'First; Second')
+        self.assertEqual(edition.other_title, '; Parallel')
+        self.assertEqual(edition.other_subtitle, 'Subtitle;')
 
     def test_identifier_types_and_binding_priority_are_normalized(self) -> None:
         edition = EditionInput(

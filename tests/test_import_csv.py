@@ -57,12 +57,24 @@ class ImportAndNormalizationTests(unittest.TestCase):
             'Preferred Press', 'Raw Press', 'Second Raw Name',
         })
 
+    def test_csv_preview_resolves_publisher_alias_like_form_submission(self) -> None:
+        normalize_publisher(PublisherNormalizationInput(
+            canonical_name='Preferred Press', aliases=['Raw Press', 'Alias Press'],
+        ))
+        create_book(make_book('Raw Press'))
+        rows = preview_csv(
+            b'title,authors,version,series,publisher,volume,location\n'
+            b'Shared Title,Shared Author,2,Collected Works,Alias Press,1,Shelf B\n'
+        )
+        self.assertEqual(len(rows[0]['matching_copies']), 1)
+        self.assertIsNotNone(rows[0]['book']['edition']['publisher_id'])
+
     def test_csv_preview_detects_existing_and_in_file_copy_matches(self) -> None:
         create_book(make_book())
         csv_bytes = (
-            'title,authors,version,series,volume,location\n'
-            'Shared Title,Shared Author,2,Collected Works,1,Shelf B\n'
-            'Shared Title,Shared Author,2,Collected Works,1,Shelf C\n'
+            'title,authors,version,series,publisher,volume,location\n'
+            'Shared Title,Shared Author,2,Collected Works,Raw Press,1,Shelf B\n'
+            'Shared Title,Shared Author,2,Collected Works,Raw Press,1,Shelf C\n'
         ).encode()
 
         rows = preview_csv(csv_bytes)
@@ -131,8 +143,8 @@ class ImportAndNormalizationTests(unittest.TestCase):
     def test_csv_can_overwrite_an_existing_copy(self) -> None:
         original = create_book(make_book())
         rows = preview_csv(
-            b'title,authors,version,series,volume,location,reading_record\n'
-            b'Shared Title,Shared Author,2,Collected Works,1,New Shelf,Replaced\n'
+            b'title,authors,version,series,publisher,volume,location,reading_record\n'
+            b'Shared Title,Shared Author,2,Collected Works,Raw Press,1,New Shelf,Replaced\n'
         )
         result = csv_import(CsvImportCommit(rows=[
             CsvImportSelection(

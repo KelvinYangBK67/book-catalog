@@ -13,14 +13,14 @@ from .database import initialize
 from .export import router as export_router
 from .import_csv import router as import_router
 from .repository import (
-    create_book, create_tag, delete_copy, delete_edition, delete_publisher,
+    create_book, create_books_batch, create_tag, delete_copy, delete_edition, delete_publisher,
     delete_tag, delete_work, get_book, get_work, list_books,
-    list_publisher_names, list_publishers, list_tags, list_works, normalize_publisher,
+    list_publisher_names, list_publishers, list_tag_violations, list_tags, list_works, normalize_publisher,
     update_book, update_copy_details,
     update_edition_details, update_tag, update_work_details,
 )
 from .schemas import (
-    BookInput, BookRecord, CopyInput, EditionInput,
+    BookBatchInput, BookInput, BookRecord, CopyInput, EditionInput,
     PublisherNormalizationInput, PublisherRecord, TagInput, TagRecord,
     WorkDetail, WorkInput, WorkSummary,
 )
@@ -51,9 +51,8 @@ if IMPE_FONTS.is_dir():
 @app.get("/", include_in_schema=False)
 def index() -> HTMLResponse:
     html = (STATIC / "index.html").read_text(encoding="utf-8")
-    html = html.replace('v=0.5.3', 'v=0.9.1').replace('app.js?v=0.5.1', 'app.js?v=0.9.1')
     if not IMPE_FONTS.is_dir():
-        html = html.replace('  <link rel="stylesheet" href="/static/fonts.css?v=0.5.3">\n', "")
+        html = html.replace('  <link rel="stylesheet" href="/static/fonts.css?v=1.0.2">\n', "")
     return HTMLResponse(html, headers={"Cache-Control": "no-cache"})
 
 
@@ -133,6 +132,11 @@ def tags() -> list[dict]:
     return list_tags()
 
 
+@app.get("/api/tags/violations")
+def tag_violations() -> list[dict]:
+    return list_tag_violations()
+
+
 @app.post("/api/tags", response_model=TagRecord, status_code=status.HTTP_201_CREATED)
 def add_tag(payload: TagInput) -> dict:
     try:
@@ -194,6 +198,14 @@ def book(copy_id: int) -> dict:
 def add_book(payload: BookInput) -> dict:
     try:
         return create_book(payload)
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+
+
+@app.post("/api/books/batch", response_model=list[BookRecord], status_code=status.HTTP_201_CREATED)
+def add_books_batch(payload: BookBatchInput) -> list[dict]:
+    try:
+        return create_books_batch(payload)
     except ValueError as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
 

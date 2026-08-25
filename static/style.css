@@ -173,9 +173,9 @@ label input:focus, label textarea:focus, label select:focus { border-color: var(
 .edition-card[open] summary { border-bottom: 1px solid var(--line); background: #faf7f0; }
 .edition-main strong, .edition-main small { display: block; }
 .edition-main strong { font-size: 17px; }
-.edition-main small, .edition-isbn small { color: var(--muted); }
-.edition-isbn { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.edition-isbn small { display: block; font-size: 10px; letter-spacing: .08em; }
+.edition-main small, .edition-identifier small { color: var(--muted); }
+.edition-identifier { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.edition-identifier small { display: block; font-size: 10px; letter-spacing: .08em; }
 .edition-count { color: var(--muted); font-size: 13px; }
 .disclosure { color: var(--accent); transition: transform .18s ease; }
 .edition-card[open] .disclosure { transform: rotate(180deg); }
@@ -325,11 +325,520 @@ label input:focus, label textarea:focus, label select:focus { border-color: var(
   .dialog-actions { padding: 15px 20px; }
   .edition-list, .work-overview { padding-left: 20px; padding-right: 20px; }
   .edition-card summary { grid-template-columns: 1fr 48px 18px; }
-  .edition-isbn { grid-column: 1; grid-row: 2; }
+  .edition-identifier { grid-column: 1; grid-row: 2; }
   .edition-count { grid-column: 2; grid-row: 1 / 3; }
   .disclosure { grid-column: 3; grid-row: 1 / 3; }
   .edition-meta { grid-template-columns: 1fr; }
   .collapsed-book-row { grid-template-columns: 1fr 20px; }
   .collapsed-book-row > span:not(.arrow) { grid-column: 1; }
   .collapsed-book-row > .arrow { grid-column: 2; grid-row: 1 / 4; }
+}
+
+
+.collection-layout {
+  display: grid;
+  grid-template-columns: minmax(9rem, 12rem) minmax(0, 1fr);
+  gap: 1.5rem;
+  align-items: start;
+}
+
+.group-index {
+  position: sticky;
+  top: 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: .25rem;
+  max-height: calc(100vh - 2rem);
+  overflow: auto;
+  padding: .75rem;
+  border: 1px solid var(--line);
+  background: var(--paper);
+}
+
+.group-index[hidden] {
+  display: none;
+}
+
+.group-index a {
+  color: var(--ink);
+  padding: .35rem .45rem;
+  text-decoration: none;
+}
+
+.group-index a:hover {
+  color: var(--accent);
+  background: var(--wash);
+}
+
+.view-group {
+  scroll-margin-top: 1rem;
+}
+
+.tag-tree-row > span {
+  padding-left: calc(var(--tag-depth, 0) * 1.35rem);
+}
+
+.tag-tree-row > span strong,
+.tag-tree-row > span small {
+  display: block;
+}
+
+.tag-violations {
+  margin-bottom: 1rem;
+  padding: .8rem 1rem;
+  border-left: 3px solid var(--accent);
+  background: var(--error-bg, #fff1ed);
+}
+
+.tag-violations p,
+.tag-violations ul {
+  margin: .35rem 0 0;
+}
+
+select[multiple] {
+  min-height: 8rem;
+}
+
+.copy-mode {
+  display: flex;
+  gap: 1rem;
+  margin-bottom: 1rem;
+}
+
+.copy-mode label {
+  display: flex;
+  align-items: center;
+  gap: .35rem;
+}
+
+.batch-fields {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: .75rem;
+  align-items: end;
+}
+
+.batch-fields > span {
+  align-self: center;
+}
+
+[hidden] {
+  display: none !important;
+}
+
+@media (max-width: 760px) {
+  .collection-layout {
+    display: block;
+  }
+
+  .group-index {
+    position: sticky;
+    top: 0;
+    z-index: 2;
+    flex-direction: row;
+    overflow-x: auto;
+    margin-bottom: .75rem;
+    white-space: nowrap;
+  }
+
+  .batch-fields {
+    grid-template-columns: 1fr;
+  }
+}
+
+
+/* Bibliographic edition cards */
+.collection-layout {
+  display: block;
+}
+
+.collection-layout.has-index {
+  display: grid;
+  grid-template-columns: minmax(9rem, 12rem) minmax(0, 1fr);
+  gap: 1.5rem;
+  align-items: start;
+}
+
+.edition-card summary,
+.merged-edition-header {
+  display: block;
+  padding: 0;
+}
+
+.edition-card[open] summary {
+  background: #faf7f0;
+}
+
+.edition-summary {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(9rem, 14rem) auto 18px;
+  gap: 10px 20px;
+  align-items: start;
+  width: 100%;
+  padding: 18px;
+  text-align: left;
+}
+
+.edition-summary-main,
+.edition-title-line,
+.edition-summary-versions,
+.edition-summary-identifiers,
+.edition-summary-identifiers > span {
+  display: block;
+  min-width: 0;
+}
+
+.edition-title-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px 10px;
+}
+
+.edition-title-line strong {
+  font-size: 18px;
+  line-height: 1.3;
+  overflow-wrap: anywhere;
+}
+
+.edition-script {
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.edition-subtitle,
+.edition-publication {
+  display: block;
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.edition-subtitle {
+  font-size: 14px;
+}
+
+.edition-summary-versions {
+  color: #48483f;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.edition-summary-versions > span {
+  display: block;
+  overflow-wrap: anywhere;
+}
+
+.edition-summary-identifiers {
+  grid-column: 1 / -1;
+  padding-top: 10px;
+  border-top: 1px solid #e5dfd3;
+  color: #4e4e47;
+  font-size: 12px;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
+.edition-count {
+  padding-top: 2px;
+  white-space: nowrap;
+}
+
+.merged-edition-header {
+  border-bottom: 1px solid var(--line);
+  background: #faf7f0;
+}
+
+.collapsed-book-row {
+  display: block;
+  padding: 0;
+}
+
+.collapsed-book-row > .edition-summary {
+  display: grid;
+}
+
+.collapsed-book-row > span:not(.edition-summary):not(.arrow) {
+  display: block;
+  padding: 0 18px 14px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.collapsed-book-row > .arrow {
+  display: none;
+}
+
+.edition-body {
+  padding-top: 16px;
+}
+
+.edition-detail-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px 22px;
+  padding-bottom: 16px;
+}
+
+.edition-detail-item {
+  min-width: 0;
+  color: #55554d;
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.edition-detail-item > small {
+  display: block;
+  margin-bottom: 4px;
+  color: var(--muted);
+  font-size: 10px;
+  letter-spacing: .06em;
+}
+
+.title-pair-detail {
+  grid-column: 1 / -1;
+}
+
+.edition-title-pairs {
+  display: grid;
+  gap: 9px;
+}
+
+.edition-title-pair strong,
+.edition-title-pair span {
+  display: block;
+}
+
+.edition-title-pair strong {
+  color: var(--ink);
+  font-size: 15px;
+  line-height: 1.35;
+}
+
+.edition-title-pair span {
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.edition-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 18px;
+}
+
+/* Unified tag picker */
+.tag-picker {
+  position: relative;
+}
+
+.tag-picker-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-height: 1px;
+  margin-top: 6px;
+}
+
+.tag-picker-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  color: var(--green);
+  background: #e9efe9;
+  border: 1px solid #cad7cc;
+  font-size: 12px;
+}
+
+.tag-picker-chip.pending {
+  border-style: dashed;
+}
+
+.tag-picker-chip span {
+  color: var(--muted);
+  font-size: 15px;
+  line-height: 1;
+}
+
+.tag-picker-entry {
+  position: relative;
+}
+
+.tag-picker-input {
+  width: 100%;
+}
+
+.tag-picker-suggestions {
+  position: absolute;
+  z-index: 20;
+  top: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  max-height: 260px;
+  overflow-y: auto;
+  border: 1px solid var(--line);
+  background: white;
+  box-shadow: 0 10px 24px rgba(43, 36, 25, .13);
+}
+
+.tag-picker-suggestions button {
+  display: block;
+  width: 100%;
+  padding: 9px 11px;
+  color: var(--ink);
+  background: white;
+  border: 0;
+  border-bottom: 1px solid #eee8dd;
+  text-align: left;
+}
+
+.tag-picker-suggestions button:hover,
+.tag-picker-suggestions button:focus {
+  background: #f5f1e8;
+}
+
+.tag-picker-suggestions strong,
+.tag-picker-suggestions small {
+  display: block;
+}
+
+.tag-picker-suggestions small {
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.tag-picker-empty {
+  display: block;
+  padding: 10px 11px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+/* True nested classification tree */
+.tag-tree,
+.tag-tree ul {
+  display: block;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.tag-tree > .tag-tree-children {
+  margin-top: 12px;
+}
+
+.tag-tree-children .tag-tree-children {
+  position: relative;
+  margin-left: 17px;
+  padding-left: 16px;
+  border-left: 1px solid #cfc7b8;
+}
+
+.tag-tree-node {
+  position: relative;
+  margin: 6px 0;
+}
+
+.tag-tree-children .tag-tree-children > .tag-tree-node::before {
+  content: "";
+  position: absolute;
+  top: 18px;
+  left: -16px;
+  width: 13px;
+  border-top: 1px solid #cfc7b8;
+}
+
+.tag-tree-row {
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 7px;
+  padding: 7px 9px;
+  border-left: 0;
+  background: #f7f4ed;
+}
+
+.tag-tree-toggle {
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  color: var(--green);
+  background: transparent;
+  border: 0;
+  font-size: 15px;
+}
+
+.tag-tree-leaf {
+  color: #aaa292;
+  font-size: 12px;
+}
+
+.tag-tree-label strong,
+.tag-tree-label small {
+  display: block;
+}
+
+.tag-tree-label small {
+  margin: 2px 0 0;
+  color: var(--muted);
+  font-size: 10px;
+}
+
+@media (max-width: 760px) {
+  .collection-layout.has-index {
+    display: block;
+  }
+
+  .edition-summary {
+    grid-template-columns: minmax(0, 1fr) auto 18px;
+  }
+
+  .edition-summary-main {
+    grid-column: 1;
+  }
+
+  .edition-summary-versions {
+    grid-column: 1;
+    grid-row: 2;
+  }
+
+  .edition-count {
+    grid-column: 2;
+    grid-row: 1 / 3;
+  }
+
+  .edition-summary > .disclosure,
+  .edition-summary > .edition-summary-spacer {
+    grid-column: 3;
+    grid-row: 1 / 3;
+  }
+
+  .edition-summary-identifiers {
+    grid-column: 1 / -1;
+  }
+
+  .edition-detail-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .title-pair-detail {
+    grid-column: 1;
+  }
+}
+
+
+.collapsed-book-row .edition-subtitle,
+.collapsed-book-row .edition-publication {
+  color: var(--muted);
+  font-size: 13px;
+  letter-spacing: normal;
+}
+
+.collapsed-book-row .edition-subtitle {
+  font-size: 14px;
 }

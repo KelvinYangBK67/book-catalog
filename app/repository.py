@@ -1,13 +1,22 @@
 from __future__ import annotations
 
 from pathlib import Path
+import re
 from sqlite3 import Connection, Row
 
 from .database import connect, initialize, transaction
+from .edition_matching import find_matching_edition
 from .schemas import (
-    BookInput, CopyInput, EditionInput,
+    BookBatchInput, BookInput, CopyInput, EditionInput,
     PublisherNormalizationInput, TagInput, WorkInput,
 )
+
+
+def natural_volume_key(value: str) -> tuple[object, ...]:
+    text = str(value or "").strip()
+    if re.fullmatch(r"\d+(?:\.\d+)*", text):
+        return (0, *(int(part) for part in text.split(".")))
+    return (1, text.casefold())
 
 
 SELECT_BOOK = """
@@ -85,6 +94,16 @@ def _set_work_tags(
         ).fetchone()[0]
         if found != len(unique_ids):
             raise ValueError("包含不存在的標籤")
+        non_leaf = connection.execute(
+            f"""SELECT t.name FROM tags t WHERE t.id IN ({placeholders})
+                AND EXISTS (SELECT 1 FROM tags child WHERE child.parent_id = t.id)
+                ORDER BY t.name LIMIT 1""",
+            unique_ids,
+        ).fetchone()
+        if non_leaf:
+            raise ValueError(
+                f"標籤「{non_leaf['name']}」已有下級分類，只能將作品掛在葉節點標籤上"
+            )
     if replace:
         connection.execute("DELETE FROM work_tags WHERE work_id = ?", (work_id,))
     connection.executemany(
@@ -148,21 +167,15 @@ def _find_or_create_edition(connection: Connection, work_id: int, edition: Editi
         edition.translated_title, edition.translated_subtitle, edition.edition_scripts,
         edition.version, edition.series, edition.publisher, publisher_id, edition.publication_year,
     )
-    match_values = values[:10] + (publisher_id, edition.publication_year)
-    if edition.version:
-        row = connection.execute(
-            """SELECT id FROM editions WHERE work_id = ?
-               AND version = ? COLLATE NOCASE ORDER BY id LIMIT 1""",
-            (work_id, edition.version),
-        ).fetchone()
-    else:
-        row = connection.execute(
-            """SELECT id FROM editions WHERE work_id = ? AND identifier = ? AND translator = ?
-               AND other_title = ? AND other_subtitle = ? AND translated_title = ? AND translated_subtitle = ?
-               AND edition_scripts = ? AND version = ? AND series = ? AND publisher_id IS ?
-               AND publication_year IS ? ORDER BY id LIMIT 1""",
-            match_values,
-        ).fetchone()
+    candidate = dict(edition.model_dump())
+    candidate["publisher_id"] = publisher_id
+    rows = connection.execute(
+        """SELECT e.*, COALESCE(p.canonical_name, '') AS publisher_canonical
+           FROM editions e LEFT JOIN publishers p ON p.id = e.publisher_id
+           WHERE e.work_id = ? ORDER BY e.id""",
+        (work_id,),
+    ).fetchall()
+    row = find_matching_edition(rows, candidate)
     if row:
         connection.execute(
             """UPDATE editions SET
@@ -226,6 +239,27 @@ def create_book(book: BookInput, path: Path | None = None) -> dict:
     return record
 
 
+def create_books_batch(batch: BookBatchInput, path: Path | None = None) -> list[dict]:
+    copy_ids: list[int] = []
+    with transaction(path) as connection:
+        work_id = _find_or_create_work(connection, batch.work)
+        edition_id = _find_or_create_edition(connection, work_id, batch.edition)
+        for volume in dict.fromkeys(batch.volumes):
+            cursor = connection.execute(
+                "INSERT INTO copies (edition_id, volume, acquisition_date, location, reading_record) VALUES (?, ?, ?, ?, ?)",
+                (
+                    edition_id, volume,
+                    batch.copy_.acquisition_date.isoformat() if batch.copy_.acquisition_date else None,
+                    batch.copy_.location, batch.copy_.reading_record,
+                ),
+            )
+            copy_ids.append(int(cursor.lastrowid))
+    return [
+        record for copy_id in copy_ids
+        if (record := get_book(copy_id, path)) is not None
+    ]
+
+
 def get_book(copy_id: int, path: Path | None = None) -> dict | None:
     connection = connect(path)
     try:
@@ -248,16 +282,21 @@ def list_books(query: str = "", path: Path | None = None) -> list[dict]:
                    OR e.identifier LIKE ? COLLATE NOCASE OR e.series LIKE ? COLLATE NOCASE
                    OR e.other_title LIKE ? COLLATE NOCASE
                    OR e.other_subtitle LIKE ? COLLATE NOCASE OR e.edition_scripts LIKE ? COLLATE NOCASE
-                   OR e.translated_title LIKE ? COLLATE NOCASE OR e.publisher LIKE ? COLLATE NOCASE
+                   OR e.translated_title LIKE ? COLLATE NOCASE
+                   OR e.translated_subtitle LIKE ? COLLATE NOCASE
+                   OR e.translator LIKE ? COLLATE NOCASE OR e.version LIKE ? COLLATE NOCASE
+                   OR e.publisher LIKE ? COLLATE NOCASE
+                   OR CAST(e.publication_year AS TEXT) LIKE ? COLLATE NOCASE
                    OR p.canonical_name LIKE ? COLLATE NOCASE
                    OR EXISTS (SELECT 1 FROM publisher_aliases pa
                               WHERE pa.publisher_id = e.publisher_id AND pa.alias LIKE ? COLLATE NOCASE)
+                   OR c.volume LIKE ? COLLATE NOCASE OR c.acquisition_date LIKE ? COLLATE NOCASE
                    OR c.location LIKE ? COLLATE NOCASE OR c.reading_record LIKE ? COLLATE NOCASE
                    OR EXISTS (SELECT 1 FROM work_tags wt JOIN tags t ON t.id = wt.tag_id
                               WHERE wt.work_id = w.id AND t.name LIKE ? COLLATE NOCASE)
             """
-            parameters = (pattern,) * 16
-        sql += " ORDER BY w.title COLLATE NOCASE, e.version COLLATE NOCASE, c.volume COLLATE NOCASE, c.id"
+            parameters = (pattern,) * 22
+        sql += " ORDER BY w.title COLLATE NOCASE, e.publication_year IS NULL, e.publication_year, e.id, c.id"
         return [_book_record(row) for row in connection.execute(sql, parameters).fetchall()]
     finally:
         connection.close()
@@ -283,16 +322,21 @@ def list_works(query: str = "", path: Path | None = None) -> list[dict]:
                    OR e.identifier LIKE ? COLLATE NOCASE OR e.series LIKE ? COLLATE NOCASE
                    OR e.other_title LIKE ? COLLATE NOCASE
                    OR e.other_subtitle LIKE ? COLLATE NOCASE OR e.edition_scripts LIKE ? COLLATE NOCASE
-                   OR e.translated_title LIKE ? COLLATE NOCASE OR e.publisher LIKE ? COLLATE NOCASE
+                   OR e.translated_title LIKE ? COLLATE NOCASE
+                   OR e.translated_subtitle LIKE ? COLLATE NOCASE
+                   OR e.translator LIKE ? COLLATE NOCASE OR e.version LIKE ? COLLATE NOCASE
+                   OR e.publisher LIKE ? COLLATE NOCASE
+                   OR CAST(e.publication_year AS TEXT) LIKE ? COLLATE NOCASE
                    OR EXISTS (SELECT 1 FROM publishers p WHERE p.id = e.publisher_id
                               AND p.canonical_name LIKE ? COLLATE NOCASE)
                    OR EXISTS (SELECT 1 FROM publisher_aliases pa
                               WHERE pa.publisher_id = e.publisher_id AND pa.alias LIKE ? COLLATE NOCASE)
+                   OR c.volume LIKE ? COLLATE NOCASE OR c.acquisition_date LIKE ? COLLATE NOCASE
                    OR c.location LIKE ? COLLATE NOCASE OR c.reading_record LIKE ? COLLATE NOCASE
                    OR EXISTS (SELECT 1 FROM work_tags wt JOIN tags t ON t.id = wt.tag_id
                               WHERE wt.work_id = w.id AND t.name LIKE ? COLLATE NOCASE)
             """
-            parameters = (pattern,) * 16
+            parameters = (pattern,) * 22
         sql += " GROUP BY w.id, w.title, w.subtitle, w.authors, w.scripts ORDER BY w.title COLLATE NOCASE, w.id"
         records = [dict(row) for row in connection.execute(sql, parameters).fetchall()]
         for record in records:
@@ -312,6 +356,16 @@ def list_works(query: str = "", path: Path | None = None) -> list[dict]:
                 "SELECT DISTINCT publication_year FROM editions WHERE work_id = ? AND publication_year IS NOT NULL ORDER BY publication_year",
                 (record["id"],),
             ).fetchall()]
+            script_values: list[str] = []
+            for row in connection.execute(
+                "SELECT CASE WHEN TRIM(edition_scripts) <> '' THEN edition_scripts ELSE ? END FROM editions WHERE work_id = ? ORDER BY id",
+                (record["scripts"], record["id"]),
+            ).fetchall():
+                for value in str(row[0] or "").split(";"):
+                    value = value.strip()
+                    if value and value not in script_values:
+                        script_values.append(value)
+            record["effective_scripts"] = script_values
         return records
     finally:
         connection.close()
@@ -334,8 +388,7 @@ def get_work(work_id: int, path: Path | None = None) -> dict | None:
                FROM editions e JOIN copies c ON c.edition_id = e.id
                LEFT JOIN publishers p ON p.id = e.publisher_id
                WHERE e.work_id = ?
-               ORDER BY e.version COLLATE NOCASE, e.publication_year, e.id,
-                        c.volume COLLATE NOCASE, c.id""",
+               ORDER BY e.publication_year IS NULL, e.publication_year, e.id, c.id""",
             (work_id,),
         ).fetchall()
         editions: list[dict] = []
@@ -365,6 +418,10 @@ def get_work(work_id: int, path: Path | None = None) -> dict | None:
             by_id[edition_id]["copies"].append({
                 "id": row["copy_id"], "volume": row["volume"], "location": row["location"],
             })
+        for group in editions:
+            group["copies"].sort(
+                key=lambda copy: (natural_volume_key(copy["volume"]), copy["id"])
+            )
         return {
             "id": work["id"],
             "work": {
@@ -456,26 +513,15 @@ def update_edition_details(
                 publisher_id, edition.publication_year, edition_id,
             ),
         )
-        if edition.version:
-            duplicate = connection.execute(
-                """SELECT id FROM editions WHERE work_id = ? AND id <> ?
-                   AND version = ? COLLATE NOCASE ORDER BY id LIMIT 1""",
-                (current["work_id"], edition_id, edition.version),
-            ).fetchone()
-        else:
-            duplicate = connection.execute(
-                """SELECT id FROM editions WHERE work_id = ? AND id <> ? AND identifier = ?
-                   AND translator = ? AND other_title = ? AND other_subtitle = ? AND translated_title = ?
-                   AND translated_subtitle = ? AND edition_scripts = ?
-                   AND version = ? AND series = ? AND publisher_id IS ?
-                   AND publication_year IS ? ORDER BY id LIMIT 1""",
-                (
-                    current["work_id"], edition_id, edition.identifier, edition.translator,
-                    edition.other_title, edition.other_subtitle, edition.translated_title, edition.translated_subtitle,
-                    edition.edition_scripts, edition.version, edition.series,
-                    publisher_id, edition.publication_year,
-                ),
-            ).fetchone()
+        candidate = dict(edition.model_dump())
+        candidate["publisher_id"] = publisher_id
+        rows = connection.execute(
+            """SELECT e.*, COALESCE(p.canonical_name, '') AS publisher_canonical
+               FROM editions e LEFT JOIN publishers p ON p.id = e.publisher_id
+               WHERE e.work_id = ? ORDER BY e.id""",
+            (current["work_id"],),
+        ).fetchall()
+        duplicate = find_matching_edition(rows, candidate, exclude_id=edition_id)
         if duplicate:
             connection.execute(
                 "UPDATE copies SET edition_id = ? WHERE edition_id = ?",
@@ -557,25 +603,7 @@ def delete_copy(copy_id: int, path: Path | None = None) -> dict | None:
 def list_tags(path: Path | None = None) -> list[dict]:
     connection = connect(path)
     try:
-        rows = connection.execute("SELECT id, name, parent_id FROM tags ORDER BY id").fetchall()
-        by_id = {row["id"]: row for row in rows}
-
-        def tag_path(row: Row) -> str:
-            names = [row["name"]]
-            parent_id = row["parent_id"]
-            visited = {row["id"]}
-            while parent_id is not None and parent_id in by_id and parent_id not in visited:
-                visited.add(parent_id)
-                parent = by_id[parent_id]
-                names.append(parent["name"])
-                parent_id = parent["parent_id"]
-            return " → ".join(reversed(names))
-
-        records = [
-            {"id": row["id"], "name": row["name"], "parent_id": row["parent_id"], "path": tag_path(row)}
-            for row in rows
-        ]
-        return sorted(records, key=lambda item: (item["path"].casefold(), item["id"]))
+        return list_tags_from_connection(connection)
     finally:
         connection.close()
 
@@ -605,7 +633,16 @@ def list_tags_from_connection(connection: Connection) -> list[dict]:
         return " → ".join(reversed(names))
 
     return sorted(
-        [{"id": row["id"], "name": row["name"], "parent_id": row["parent_id"], "path": path_for(row)} for row in rows],
+        [{
+            "id": row["id"], "name": row["name"], "parent_id": row["parent_id"],
+            "path": path_for(row),
+            "has_children": connection.execute(
+                "SELECT 1 FROM tags WHERE parent_id = ? LIMIT 1", (row["id"],)
+            ).fetchone() is not None,
+            "assigned_work_count": connection.execute(
+                "SELECT COUNT(*) FROM work_tags WHERE tag_id = ?", (row["id"],)
+            ).fetchone()[0],
+        } for row in rows],
         key=lambda item: (item["path"].casefold(), item["id"]),
     )
 
@@ -616,6 +653,10 @@ def create_tag(tag: TagInput, path: Path | None = None) -> dict:
             parent = connection.execute("SELECT id FROM tags WHERE id = ?", (tag.parent_id,)).fetchone()
             if not parent:
                 raise ValueError("上級標籤不存在")
+            if connection.execute(
+                "SELECT 1 FROM work_tags WHERE tag_id = ? LIMIT 1", (tag.parent_id,)
+            ).fetchone():
+                raise ValueError("此標籤已有藏書，請先重新分類後再建立下級標籤。")
         existing = connection.execute(
             "SELECT id FROM tags WHERE name = ? COLLATE NOCASE AND parent_id IS ?",
             (tag.name, tag.parent_id),
@@ -637,6 +678,10 @@ def update_tag(tag_id: int, tag: TagInput, path: Path | None = None) -> dict | N
             return None
         if tag.parent_id == tag_id:
             raise ValueError("標籤不能以自己作為上級")
+        if tag.parent_id is not None and connection.execute(
+            "SELECT 1 FROM work_tags WHERE tag_id = ? LIMIT 1", (tag.parent_id,)
+        ).fetchone():
+            raise ValueError("此標籤已有藏書，請先重新分類後再建立下級標籤。")
         parent_id = tag.parent_id
         visited = {tag_id}
         while parent_id is not None:
@@ -661,6 +706,24 @@ def update_tag(tag_id: int, tag: TagInput, path: Path | None = None) -> dict | N
             (tag.name, tag.parent_id, tag_id),
         )
         return next(record for record in list_tags_from_connection(connection) if record["id"] == tag_id)
+
+
+def list_tag_violations(path: Path | None = None) -> list[dict]:
+    connection = connect(path)
+    try:
+        tags = {item["id"]: item for item in list_tags_from_connection(connection)}
+        rows = connection.execute(
+            """SELECT wt.work_id, w.title, wt.tag_id FROM work_tags wt
+               JOIN works w ON w.id = wt.work_id
+               WHERE EXISTS (SELECT 1 FROM tags child WHERE child.parent_id = wt.tag_id)
+               ORDER BY w.title COLLATE NOCASE, wt.work_id"""
+        ).fetchall()
+        return [{
+            "work_id": row["work_id"], "work_title": row["title"],
+            "tag_id": row["tag_id"], "tag_path": tags[row["tag_id"]]["path"],
+        } for row in rows]
+    finally:
+        connection.close()
 
 
 def delete_tag(tag_id: int, path: Path | None = None) -> dict | None:

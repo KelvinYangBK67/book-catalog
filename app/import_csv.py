@@ -7,7 +7,8 @@ from typing import Literal
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
-from .repository import create_book, list_books, update_book
+from .edition_matching import editions_match
+from .repository import create_book, list_books, list_publishers, update_book
 from .schemas import BookInput
 
 
@@ -79,6 +80,11 @@ def preview_csv(content: bytes) -> list[dict]:
     if not reader.fieldnames or 'title' not in reader.fieldnames:
         raise ValueError('CSV is missing the title column')
 
+    publisher_ids = {
+        alias.strip().casefold(): publisher['id']
+        for publisher in list_publishers()
+        for alias in publisher['aliases']
+    }
     candidates = [
         {
             'book': candidate,
@@ -96,6 +102,10 @@ def preview_csv(content: bytes) -> list[dict]:
             continue
         try:
             book = _book_from_row(row)
+            if book.edition.publisher and book.edition.publisher_id is None:
+                book.edition.publisher_id = publisher_ids.get(
+                    book.edition.publisher.strip().casefold()
+                )
         except (ValueError, TypeError) as error:
             raise ValueError(f'CSV row {index}: {error}') from error
         edition_matches = [
@@ -103,7 +113,7 @@ def preview_csv(content: bytes) -> list[dict]:
             for candidate in candidates
             if _key(candidate['book']['work']['title']) == _key(book.work.title)
             and _key(candidate['book']['work']['authors']) == _key(book.work.authors)
-            and _key(candidate['book']['edition']['version']) == _key(book.edition.version)
+            and editions_match(candidate['book']['edition'], book.edition)
         ]
         duplicates = [
             {

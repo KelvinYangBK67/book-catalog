@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import date
 import re
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 def normalize_semicolon_text(value: object) -> object:
@@ -12,6 +12,14 @@ def normalize_semicolon_text(value: object) -> object:
     for separator in ('；', '、', '，'):
         value = value.replace(separator, ';')
     return '; '.join(part.strip() for part in value.split(';') if part.strip())
+
+
+def normalize_semicolon_slots(value: object) -> object:
+    if not isinstance(value, str):
+        return value
+    for separator in ('；', '、', '，'):
+        value = value.replace(separator, ';')
+    return '; '.join(part.strip() for part in value.split(';'))
 
 
 def normalize_version_text(value: object) -> object:
@@ -93,7 +101,7 @@ class WorkInput(CleanModel):
         return [
             part.strip()
             for item in raw_items
-            for part in str(item).split(';')
+            for part in str(normalize_semicolon_text(str(item))).split(';')
             if part.strip()
         ]
 
@@ -112,6 +120,16 @@ class EditionInput(CleanModel):
     publisher_canonical: str = ""
     publication_year: int | None = Field(default=None, ge=0, le=9999)
     series: str = Field(default='', max_length=500)
+
+    @model_validator(mode='before')
+    @classmethod
+    def normalize_paired_titles(cls, value: object) -> object:
+        if isinstance(value, dict):
+            value = dict(value)
+            for field in ('other_title', 'other_subtitle'):
+                if field in value:
+                    value[field] = normalize_semicolon_slots(value[field])
+        return value
 
     @field_validator('translator', 'edition_scripts', 'series', mode='before')
     @classmethod
@@ -154,6 +172,20 @@ class BookInput(BaseModel):
     copy_: CopyInput = Field(alias="copy")
 
 
+class BookBatchInput(BaseModel):
+    work: WorkInput
+    edition: EditionInput
+    copy_: CopyInput = Field(alias="copy")
+    volumes: list[str] = Field(min_length=1, max_length=500)
+
+    @field_validator("volumes", mode="before")
+    @classmethod
+    def normalize_volumes(cls, value: object) -> object:
+        if isinstance(value, str):
+            value = normalize_semicolon_text(value).split("; ")
+        return [str(item).strip() for item in (value or []) if str(item).strip()]
+
+
 class BookRecord(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
@@ -185,6 +217,8 @@ class TagRecord(BaseModel):
     name: str
     parent_id: int | None
     path: str
+    has_children: bool = False
+    assigned_work_count: int = 0
 
 
 class PublisherNormalizationInput(CleanModel):
@@ -210,6 +244,7 @@ class WorkSummary(BaseModel):
     publishers: list[str]
     locations: list[str]
     years: list[int]
+    effective_scripts: list[str]
 
 
 class WorkDetail(BaseModel):

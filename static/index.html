@@ -4,8 +4,8 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>紙上藏書</title>
-  <link rel="stylesheet" href="/static/fonts.css?v=0.5.3">
-  <link rel="stylesheet" href="/static/style.css?v=0.5.3">
+  <link rel="stylesheet" href="/static/fonts.css?v=1.0.2">
+  <link rel="stylesheet" href="/static/style.css?v=1.0.2">
 </head>
 <body>
   <header class="topbar">
@@ -53,14 +53,17 @@
         </div>
       </div>
       <div id="notice" class="notice" hidden></div>
-      <div id="book-list" class="book-list" aria-live="polite"></div>
+      <div class="collection-layout">
+        <nav id="group-index" class="group-index" aria-label="分組索引" hidden></nav>
+        <div id="book-list" class="book-list" aria-live="polite"></div>
+      </div>
     </section>
   </main>
 
   <dialog id="book-dialog" class="dialog">
     <form id="book-form" method="dialog">
       <div class="dialog-header">
-        <div><p class="eyebrow" id="form-mode">NEW COPY</p><h2 id="form-title">新增藏書</h2></div>
+        <div><p class="eyebrow" id="form-mode">新增實物冊</p><h2 id="form-title">新增藏書</h2></div>
         <button class="icon-button" value="cancel" aria-label="關閉" type="button" data-close>×</button>
       </div>
       <input type="hidden" id="copy-id">
@@ -70,25 +73,32 @@
         <div class="fields two">
           <label class="wide">標題 <em>必填</em><input name="work.title" required maxlength="500"></label>
           <label class="wide">副標題<input name="work.subtitle" maxlength="500"></label>
-          <label class="wide">作者或相關責任人<input name="work.authors" maxlength="1000" placeholder="記錄主要對應人物，多位可用、分隔"></label>
-          <label>文種<input name="work.scripts" maxlength="500" placeholder="例如：藏文、漢文"></label>
-          <label>標籤<input name="work.tags" maxlength="1000" list="tag-suggestions" placeholder="直接輸入，以空格分隔，例如：藏文 佛教 西藏"></label>
-          <datalist id="tag-suggestions"></datalist>
+          <label class="wide">作者或相關責任人<input name="work.authors" maxlength="1000" placeholder="多項用半角分號 ; 分隔"></label>
+          <label>文種<input name="work.scripts" maxlength="500" placeholder="多項用半角分號 ; 分隔"></label>
+          <div class="wide tag-picker" data-tag-picker>
+            <span class="field-label">標籤</span>
+            <div class="tag-picker-chips"></div>
+            <div class="tag-picker-entry">
+              <input class="tag-picker-input" maxlength="1000" autocomplete="off"
+                     placeholder="選擇已有標籤或直接輸入；多項用半角分號 ; 分隔">
+              <div class="tag-picker-suggestions" hidden></div>
+            </div>
+            <select class="tag-id-store" name="work.tag_ids" multiple hidden></select>
+            <input class="tag-name-store" name="work.tags" type="hidden">
+          </div>
         </div>
       </fieldset>
 
       <fieldset>
         <legend><span>02</span> 版本信息</legend>
         <div class="fields two">
-          <label class="wide">識別號<input name="edition.identifier" maxlength="1000" placeholder="可完整保留 ISBN、出版社編號、民族文字標識等"></label>
-          <label>版本<input name="edition.version" maxlength="200" placeholder="例如：第 2 版、修訂版"></label>
-          <label>系列<input name="edition.series" maxlength="500" placeholder="本書所屬系列"></label>
-          <label>卷冊<input name="copy.volume" maxlength="100" placeholder="例如：1.2.3"></label>
+          <label>版本<input name="edition.version" maxlength="200" placeholder="多項用半角分號 ; 分隔；純數字會轉為第 X 版"></label>
+          <label>系列<input name="edition.series" maxlength="500" placeholder="多項用半角分號 ; 分隔"></label>
           <label>出版社原始名稱<input name="edition.publisher" maxlength="500" list="publisher-suggestions"></label>
           <datalist id="publisher-suggestions"></datalist>
           <label>出版年份<input name="edition.publication_year" type="number" min="0" max="9999" inputmode="numeric"></label>
-          <label>文種<input name="edition.edition_scripts" maxlength="500" placeholder="留空時繼承作品文種"></label>
-          <label>譯者或相關責任人<input name="edition.translator" maxlength="500"></label>
+          <label class="wide">識別號<input name="edition.identifier" maxlength="1000" placeholder="多項用半角分號 ; 分隔"></label>
+          <label>文種<input name="edition.edition_scripts" maxlength="500" placeholder="留空繼承作品文種；多項用半角分號 ; 分隔"></label>
           <div class="wide paired-title-editor" data-paired-titles
                data-title-name="edition.other_title" data-subtitle-name="edition.other_subtitle">
             <span class="field-label">其他標題</span>
@@ -97,12 +107,24 @@
           </div>
           <label class="wide">翻譯標題<input name="edition.translated_title" maxlength="500"></label>
           <label class="wide">翻譯副標題<input name="edition.translated_subtitle" maxlength="500"></label>
+          <label class="wide">譯者或相關責任人<input name="edition.translator" maxlength="500" placeholder="多項用半角分號 ; 分隔"></label>
         </div>
       </fieldset>
 
       <fieldset>
         <legend><span>03</span> 實物冊信息</legend>
+        <div class="copy-mode" id="copy-mode-controls">
+          <label><input type="radio" name="copy-mode" value="single" checked> 單冊</label>
+          <label><input type="radio" name="copy-mode" value="batch"> 批量</label>
+        </div>
         <div class="fields two">
+          <label data-single-volume>卷冊<input name="copy.volume" maxlength="100" placeholder="例如：1.2.3"></label>
+          <div class="wide batch-fields" data-batch-fields hidden>
+            <label>起始卷冊<input name="batch.start" type="number" min="1" step="1" placeholder="1"></label>
+            <label>結束卷冊<input name="batch.end" type="number" min="1" step="1" placeholder="20"></label>
+            <span>或</span>
+            <label class="wide">自訂卷冊列表<input name="batch.volumes" maxlength="5000" placeholder="1; 1.1; 1.2; 2; 3（多項用半角分號 ; 分隔）"></label>
+          </div>
           <label>取得日期<input name="copy.acquisition_date" type="date"></label>
           <label>藏書位置<input name="copy.location" maxlength="500" placeholder="例如：書房 A 架 2 層"></label>
           <label class="wide">閱讀記錄<textarea name="copy.reading_record" maxlength="5000" rows="4" placeholder="閱讀進度、心得或重讀日期……"></textarea></label>
@@ -129,6 +151,7 @@
       </form>
       <div>
         <p class="eyebrow">EXISTING TAGS</p>
+        <div id="tag-violations" class="tag-violations" hidden></div>
         <div id="tag-tree" class="tag-tree"></div>
       </div>
       <form id="tag-edit-form" class="tag-create-form">
@@ -143,7 +166,7 @@
 
   <dialog id="detail-dialog" class="dialog detail-dialog">
     <div class="dialog-header">
-      <div><p class="eyebrow">BOOK DETAILS</p><h2 id="detail-title"></h2></div>
+      <div><p class="eyebrow">藏書詳情</p><h2 id="detail-title"></h2></div>
       <button class="icon-button" aria-label="關閉" type="button" data-detail-close>×</button>
     </div>
     <div id="detail-content"></div>
@@ -157,13 +180,23 @@
 
   <dialog id="work-edit-dialog" class="dialog layer-edit-dialog">
     <form id="work-edit-form">
-      <div class="dialog-header"><div><p class="eyebrow">EDIT WORK</p><h2>修改作品</h2></div><button class="icon-button" type="button" data-work-edit-close>×</button></div>
+      <div class="dialog-header"><div><p class="eyebrow">修改作品</p><h2>修改作品</h2></div><button class="icon-button" type="button" data-work-edit-close>×</button></div>
       <fieldset><div class="fields two">
         <label class="wide">標題 <em>必填</em><input name="title" required maxlength="500"></label>
         <label class="wide">副標題<input name="subtitle" maxlength="500"></label>
-        <label class="wide">作者或相關責任人<input name="authors" maxlength="1000"></label>
-        <label>文種<input name="scripts" maxlength="500"></label>
-        <label>標籤<input name="tag_names" maxlength="1000" list="tag-suggestions" placeholder="以空格分隔"></label>
+        <label class="wide">作者或相關責任人<input name="authors" maxlength="1000" placeholder="多項用半角分號 ; 分隔"></label>
+        <label>文種<input name="scripts" maxlength="500" placeholder="多項用半角分號 ; 分隔"></label>
+        <div class="wide tag-picker" data-tag-picker>
+          <span class="field-label">標籤</span>
+          <div class="tag-picker-chips"></div>
+          <div class="tag-picker-entry">
+            <input class="tag-picker-input" maxlength="1000" autocomplete="off"
+                 placeholder="選擇已有標籤或直接輸入；多項用半角分號 ; 分隔">
+            <div class="tag-picker-suggestions" hidden></div>
+          </div>
+          <select class="tag-id-store" name="tag_ids" multiple hidden></select>
+          <input class="tag-name-store" name="tag_names" type="hidden">
+        </div>
       </div></fieldset>
       <div class="dialog-actions"><button class="secondary" type="button" data-work-edit-close>取消</button><button class="primary" type="submit">保存作品</button></div>
     </form>
@@ -171,15 +204,14 @@
 
   <dialog id="edition-edit-dialog" class="dialog layer-edit-dialog">
     <form id="edition-edit-form">
-      <div class="dialog-header"><div><p class="eyebrow">EDIT EDITION</p><h2>修改版本</h2></div><button class="icon-button" type="button" data-edition-edit-close>×</button></div>
+      <div class="dialog-header"><div><p class="eyebrow">修改版本</p><h2>修改版本</h2></div><button class="icon-button" type="button" data-edition-edit-close>×</button></div>
       <fieldset><div class="fields two">
-        <label>版本<input name="version" maxlength="200"></label>
-        <label class="wide">識別號<input name="identifier" maxlength="1000"></label>
-        <label>系列<input name="series" maxlength="500"></label>
+        <label>版本<input name="version" maxlength="200" placeholder="多項用半角分號 ; 分隔"></label>
+        <label>系列<input name="series" maxlength="500" placeholder="多項用半角分號 ; 分隔"></label>
         <label>出版社原始名稱<input name="publisher" maxlength="500" list="publisher-suggestions"></label>
         <label>出版年份<input name="publication_year" type="number" min="0" max="9999"></label>
-        <label>文種<input name="edition_scripts" maxlength="500" placeholder="留空時繼承作品文種"></label>
-        <label>譯者或相關責任人<input name="translator" maxlength="500"></label>
+        <label class="wide">識別號<input name="identifier" maxlength="1000" placeholder="多項用半角分號 ; 分隔"></label>
+        <label>文種<input name="edition_scripts" maxlength="500" placeholder="留空繼承作品文種；多項用半角分號 ; 分隔"></label>
         <div class="wide paired-title-editor" data-paired-titles
              data-title-name="other_title" data-subtitle-name="other_subtitle">
           <span class="field-label">其他標題</span>
@@ -188,6 +220,7 @@
         </div>
         <label class="wide">翻譯標題<input name="translated_title" maxlength="500"></label>
         <label class="wide">翻譯副標題<input name="translated_subtitle" maxlength="500"></label>
+        <label class="wide">譯者或相關責任人<input name="translator" maxlength="500" placeholder="多項用半角分號 ; 分隔"></label>
       </div></fieldset>
       <div class="dialog-actions"><button class="secondary" type="button" data-edition-edit-close>取消</button><button class="primary" type="submit">保存版本</button></div>
     </form>
@@ -195,7 +228,7 @@
 
   <dialog id="copy-edit-dialog" class="dialog layer-edit-dialog">
     <form id="copy-edit-form">
-      <div class="dialog-header"><div><p class="eyebrow">EDIT COPY</p><h2>修改實物冊</h2></div><button class="icon-button" type="button" data-copy-edit-close>×</button></div>
+      <div class="dialog-header"><div><p class="eyebrow">修改實物冊</p><h2>修改實物冊</h2></div><button class="icon-button" type="button" data-copy-edit-close>×</button></div>
       <fieldset><div class="fields two">
         <label>卷冊<input name="volume" maxlength="100" placeholder="例如：1.2.3"></label>
         <label>取得日期<input name="acquisition_date" type="date"></label>
@@ -208,7 +241,7 @@
 
   <dialog id="copy-dialog" class="dialog detail-dialog">
     <div class="dialog-header">
-      <div><p class="eyebrow">COPY DETAILS</p><h2 id="copy-detail-title"></h2></div>
+      <div><p class="eyebrow">實物冊詳情</p><h2 id="copy-detail-title"></h2></div>
       <button class="icon-button" aria-label="關閉" type="button" data-copy-close>×</button>
     </div>
     <div id="copy-detail-content"></div>
@@ -256,6 +289,6 @@
     </div>
   </dialog>
 
-  <script src="/static/app.js?v=0.5.1" defer></script>
+  <script src="/static/app.js?v=1.0.2" defer></script>
 </body>
 </html>

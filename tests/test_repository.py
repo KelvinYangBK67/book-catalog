@@ -8,13 +8,13 @@ from pathlib import Path
 
 from app.database import connect, initialize
 from app.repository import (
-    create_book, create_tag, delete_copy, delete_edition, delete_publisher,
+    create_book, create_books_batch, create_tag, delete_copy, delete_edition, delete_publisher,
     delete_tag, delete_work, get_book, get_work, list_books, list_publishers,
-    list_tags, list_works, normalize_publisher, update_book, update_copy_details,
+    list_tag_violations, list_tags, list_works, normalize_publisher, update_book, update_copy_details,
     update_edition_details, update_tag, update_work_details,
 )
 from app.schemas import (
-    BookInput, CopyInput, EditionInput,
+    BookBatchInput, BookInput, CopyInput, EditionInput,
     PublisherNormalizationInput, TagInput, WorkInput,
 )
 
@@ -250,8 +250,10 @@ class RepositoryTests(unittest.TestCase):
     def test_different_version_creates_another_edition(self) -> None:
         first = sample_book()
         first.edition.version = "初版"
+        first.edition.identifier = ""
         second = sample_book()
         second.edition.version = "修訂版"
+        second.edition.identifier = ""
 
         create_book(first, self.path)
         create_book(second, self.path)
@@ -263,11 +265,13 @@ class RepositoryTests(unittest.TestCase):
             {"初版", "修訂版"},
         )
 
-    def test_same_named_version_merges_despite_other_metadata_difference(self) -> None:
+    def test_same_named_version_with_different_publication_facts_stays_separate(self) -> None:
         first = sample_book()
+        first.edition.identifier = ""
         first.edition.version = "第 2 版"
         first.edition.publication_year = 2002
         second = sample_book()
+        second.edition.identifier = ""
         second.edition.version = "第 2 版"
         second.edition.publication_year = 2012
         second.copy_.volume = "2"
@@ -277,9 +281,27 @@ class RepositoryTests(unittest.TestCase):
 
         detail = get_work(list_works(path=self.path)[0]["id"], self.path)
         assert detail is not None
+        self.assertEqual(len(detail["editions"]), 2)
+        self.assertEqual(
+            [item["edition"]["publication_year"] for item in detail["editions"]],
+            [2002, 2012],
+        )
+
+    def test_shared_identifier_takes_priority_over_other_edition_facts(self) -> None:
+        first = sample_book()
+        first.edition.version = "初版"
+        first.edition.publication_year = 2002
+        second = sample_book()
+        second.edition.version = "修訂版"
+        second.edition.publication_year = 2012
+
+        create_book(first, self.path)
+        create_book(second, self.path)
+
+        detail = get_work(list_works(path=self.path)[0]["id"], self.path)
+        assert detail is not None
         self.assertEqual(len(detail["editions"]), 1)
         self.assertEqual(len(detail["editions"][0]["copies"]), 2)
-        self.assertEqual(detail["editions"][0]["edition"]["version"], "第 2 版")
 
     def test_work_matching_ignores_case_and_surrounding_space(self) -> None:
         first = sample_book("Example")
@@ -315,13 +337,71 @@ class RepositoryTests(unittest.TestCase):
         self.assertEqual({tag["name"] for tag in list_tags(self.path)}, {"藏文", "佛教", "西藏"})
         self.assertEqual(len(created["work"]["tag_ids"]), 3)
         buddhism = next(tag for tag in list_tags(self.path) if tag["name"] == "佛教")
-        tibet = next(tag for tag in list_tags(self.path) if tag["name"] == "西藏")
+        parent = create_tag(TagInput(name="思想"), self.path)
         updated = update_tag(
-            buddhism["id"], TagInput(name="藏傳佛教", parent_id=tibet["id"]), self.path
+            buddhism["id"], TagInput(name="藏傳佛教", parent_id=parent["id"]), self.path
         )
         assert updated is not None
-        self.assertEqual(updated["path"], "西藏 → 藏傳佛教")
+        self.assertEqual(updated["path"], "思想 → 藏傳佛教")
         self.assertEqual(len(list_works("藏傳佛教", self.path)), 1)
+
+    def test_only_leaf_tags_can_hold_works_and_assigned_tags_cannot_gain_children(self) -> None:
+        parent = create_tag(TagInput(name="思想"), self.path)
+        leaf = create_tag(TagInput(name="佛教", parent_id=parent["id"]), self.path)
+        invalid = sample_book("非法分類")
+        invalid.work.tag_ids = [parent["id"]]
+        with self.assertRaisesRegex(ValueError, "葉節點"):
+            create_book(invalid, self.path)
+
+        valid = sample_book("合法分類")
+        valid.work.tag_ids = [leaf["id"]]
+        create_book(valid, self.path)
+        with self.assertRaisesRegex(ValueError, "已有藏書"):
+            create_tag(TagInput(name="藏傳佛教", parent_id=leaf["id"]), self.path)
+
+    def test_existing_non_leaf_assignments_are_reported_without_being_changed(self) -> None:
+        parent = create_tag(TagInput(name="思想"), self.path)
+        book = create_book(sample_book("待整理"), self.path)
+        work_id = list_works("待整理", self.path)[0]["id"]
+        connection = connect(self.path)
+        try:
+            connection.execute("INSERT INTO work_tags (work_id, tag_id) VALUES (?, ?)", (work_id, parent["id"]))
+            connection.execute("INSERT INTO tags (name, parent_id) VALUES ('宗教', ?)", (parent["id"],))
+            connection.commit()
+        finally:
+            connection.close()
+
+        violations = list_tag_violations(self.path)
+        self.assertEqual(violations[0]["work_id"], work_id)
+        self.assertEqual(violations[0]["tag_path"], "思想")
+        self.assertIsNotNone(get_book(book["id"], self.path))
+
+    def test_batch_copies_share_one_edition_and_volumes_sort_naturally(self) -> None:
+        book = sample_book("自然卷冊")
+        records = create_books_batch(BookBatchInput(
+            work=book.work, edition=book.edition, copy=book.copy_,
+            volumes=["1", "1.10", "2", "1.2", "11", "10"],
+        ), self.path)
+        self.assertEqual(len(records), 6)
+        detail = get_work(list_works("自然卷冊", self.path)[0]["id"], self.path)
+        assert detail is not None
+        self.assertEqual(len(detail["editions"]), 1)
+        self.assertEqual(
+            [copy["volume"] for copy in detail["editions"][0]["copies"]],
+            ["1", "1.2", "1.10", "2", "10", "11"],
+        )
+
+    def test_effective_scripts_aggregate_from_each_edition(self) -> None:
+        french = sample_book("多文種作品")
+        french.edition.identifier = "ID-FR"
+        french.edition.edition_scripts = "法文"
+        german = sample_book("多文種作品")
+        german.edition.identifier = "ID-DE"
+        german.edition.edition_scripts = "德文"
+        create_book(french, self.path)
+        create_book(german, self.path)
+        summary = list_works("多文種作品", self.path)[0]
+        self.assertEqual(summary["effective_scripts"], ["法文", "德文"])
 
     def test_publisher_aliases_resolve_automatically_and_preserve_raw_name(self) -> None:
         first = sample_book("出版社測試一")
@@ -402,8 +482,11 @@ class RepositoryTests(unittest.TestCase):
         self.assertEqual(copy["copy"]["location"], "新位置")
 
     def test_searches_all_required_fields(self) -> None:
-        create_book(sample_book(), self.path)
-        terms = ["百年", "加西亚", "978957", "皇冠", "A 架", "已讀"]
+        book = sample_book()
+        book.edition.version = "珍藏版"
+        book.edition.translated_subtitle = "魔幻家族史"
+        create_book(book, self.path)
+        terms = ["百年", "加西亚", "葉淑吟", "珍藏版", "魔幻家族史", "978957", "皇冠", "2018", "1.2.3", "2024-01-03", "A 架", "已讀"]
         for term in terms:
             with self.subTest(term=term):
                 self.assertEqual(len(list_books(term, self.path)), 1)
