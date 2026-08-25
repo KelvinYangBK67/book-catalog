@@ -42,7 +42,8 @@ def export_csv() -> Response:
         'edition_title', 'edition_subtitle', 'work_ids', 'work_relations', 'identifier', 'version', 'series', 'translator', 'other_title', 'other_subtitle',
         'translated_title', 'translated_subtitle', 'edition_scripts',
         'publisher', 'publisher_canonical', 'publication_year',
-        'volume_number', 'volume_title', 'acquisition_date', 'location', 'reading_record',
+        'volume_number', 'volume_title', 'copy_identifier',
+        'acquisition_date', 'location', 'reading_record',
     ]
     output = StringIO(newline='')
     writer = csv.DictWriter(output, fieldnames=fields)
@@ -71,6 +72,7 @@ def export_csv() -> Response:
             'publisher_canonical': edition['publisher_canonical'],
             'publication_year': edition['publication_year'],
             'volume_number': copy['volume_number'], 'volume_title': copy['volume_title'],
+            'copy_identifier': copy['identifier'],
             'acquisition_date': copy['acquisition_date'],
             'location': copy['location'], 'reading_record': copy['reading_record'],
         })

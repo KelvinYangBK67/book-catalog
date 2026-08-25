@@ -80,7 +80,10 @@ def initialize(path: Path | None = None) -> None:
                 publisher TEXT NOT NULL DEFAULT '',
                 publisher_id INTEGER REFERENCES publishers(id) ON DELETE SET NULL,
                 publication_year INTEGER,
-                CHECK (publication_year IS NULL OR publication_year BETWEEN 0 AND 9999)
+                publication_year_end INTEGER,
+                force_separate INTEGER NOT NULL DEFAULT 0,
+                CHECK (publication_year IS NULL OR publication_year BETWEEN 0 AND 9999),
+                CHECK (publication_year_end IS NULL OR publication_year_end BETWEEN 0 AND 9999)
             );
 
             CREATE TABLE IF NOT EXISTS edition_works (
@@ -99,6 +102,7 @@ def initialize(path: Path | None = None) -> None:
                 edition_id INTEGER NOT NULL REFERENCES editions(id) ON DELETE CASCADE,
                 volume_number TEXT NOT NULL DEFAULT '',
                 volume_title TEXT NOT NULL DEFAULT '',
+                identifier TEXT NOT NULL DEFAULT '',
                 acquisition_date TEXT,
                 location TEXT NOT NULL DEFAULT '',
                 reading_record TEXT NOT NULL DEFAULT ''
@@ -161,6 +165,10 @@ def initialize(path: Path | None = None) -> None:
             )
         if "publisher_id" not in edition_columns:
             connection.execute("ALTER TABLE editions ADD COLUMN publisher_id INTEGER REFERENCES publishers(id) ON DELETE SET NULL")
+        if "publication_year_end" not in edition_columns:
+            connection.execute("ALTER TABLE editions ADD COLUMN publication_year_end INTEGER")
+        if "force_separate" not in edition_columns:
+            connection.execute("ALTER TABLE editions ADD COLUMN force_separate INTEGER NOT NULL DEFAULT 0")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_editions_identifier ON editions(identifier)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_editions_publisher_id ON editions(publisher_id)")
 
@@ -169,6 +177,8 @@ def initialize(path: Path | None = None) -> None:
             connection.execute("ALTER TABLE copies ADD COLUMN volume_number TEXT NOT NULL DEFAULT ''")
         if "volume_title" not in copy_columns:
             connection.execute("ALTER TABLE copies ADD COLUMN volume_title TEXT NOT NULL DEFAULT ''")
+        if "identifier" not in copy_columns:
+            connection.execute("ALTER TABLE copies ADD COLUMN identifier TEXT NOT NULL DEFAULT ''")
         if "volume" in copy_columns:
             connection.execute("UPDATE copies SET volume_number = volume WHERE volume_number = ''")
         if "volume" in edition_columns:
@@ -263,7 +273,8 @@ def initialize(path: Path | None = None) -> None:
         editions = connection.execute(
             """SELECT id, work_id, title, subtitle, identifier, translator, other_title, other_subtitle,
                       translated_title, translated_subtitle, edition_scripts, version, series, publisher, publisher_id,
-                      publication_year FROM editions ORDER BY id"""
+                      publication_year, publication_year_end, force_separate
+               FROM editions ORDER BY id"""
         ).fetchall()
         canonical_editions: dict[int, list[sqlite3.Row]] = {}
         for edition in editions:
@@ -273,11 +284,29 @@ def initialize(path: Path | None = None) -> None:
                 candidates.append(edition)
                 continue
             canonical_id = canonical["id"]
+            identifiers: list[str] = []
+            seen_identifiers: set[str] = set()
+            for raw_identifier in (canonical["identifier"], edition["identifier"]):
+                for identifier in str(raw_identifier or "").split(";"):
+                    identifier = identifier.strip()
+                    key = identifier.casefold()
+                    if identifier and key not in seen_identifiers:
+                        seen_identifiers.add(key)
+                        identifiers.append(identifier)
+            years = [
+                year for year in (
+                    canonical["publication_year"], canonical["publication_year_end"],
+                    edition["publication_year"], edition["publication_year_end"],
+                )
+                if year is not None
+            ]
+            merged_year_start = min(years) if years else None
+            merged_year_end = max(years) if years else None
             connection.execute(
                 """UPDATE editions SET
                        title = CASE WHEN title = '' THEN ? ELSE title END,
                        subtitle = CASE WHEN subtitle = '' THEN ? ELSE subtitle END,
-                       identifier = CASE WHEN identifier = '' THEN ? ELSE identifier END,
+                       identifier = ?,
                        translator = CASE WHEN translator = '' THEN ? ELSE translator END,
                        other_title = CASE WHEN other_title = '' THEN ? ELSE other_title END,
                        other_subtitle = CASE WHEN other_subtitle = '' THEN ? ELSE other_subtitle END,
@@ -287,15 +316,16 @@ def initialize(path: Path | None = None) -> None:
                        series = CASE WHEN series = '' THEN ? ELSE series END,
                        publisher = CASE WHEN publisher = '' THEN ? ELSE publisher END,
                        publisher_id = COALESCE(publisher_id, ?),
-                       publication_year = COALESCE(publication_year, ?)
+                       publication_year = ?,
+                       publication_year_end = ?
                    WHERE id = ?""",
                 (
                     edition["title"], edition["subtitle"],
-                    edition["identifier"], edition["translator"], edition["other_title"], edition["other_subtitle"],
+                    "; ".join(identifiers), edition["translator"], edition["other_title"], edition["other_subtitle"],
                     edition["translated_title"], edition["translated_subtitle"],
                     edition["edition_scripts"], edition["series"],
                     edition["publisher"], edition["publisher_id"],
-                    edition["publication_year"], canonical_id,
+                    merged_year_start, merged_year_end, canonical_id,
                 ),
             )
             for link in connection.execute(

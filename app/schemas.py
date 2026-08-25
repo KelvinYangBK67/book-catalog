@@ -37,13 +37,11 @@ def normalize_identifier_text(value: object) -> object:
     normalized = normalize_semicolon_text(value)
     if not isinstance(normalized, str) or not normalized:
         return normalized
-    choices: dict[str, tuple[int, int, str]] = {}
+    groups: dict[str, list[tuple[int, int, str, bool]]] = {}
     order: list[str] = []
     priorities = {'hbk': 3, 'pbk': 2, 'ebook': 1}
     for position, raw_part in enumerate(normalized.split('; ')):
         part = raw_part.strip()
-        # Normalization may run more than once (for example after an import
-        # followed by an edit). Generic labels must not accumulate.
         part = re.sub(r'^(?:識別號\s*[:：]?\s*)+', '', part).strip()
         qualifier_match = re.search(
             r'\s*\((hbk|pbk|ebook)\.?\)\s*$', part, flags=re.IGNORECASE
@@ -70,12 +68,26 @@ def normalize_identifier_text(value: object) -> object:
             else:
                 kind, content = '識別號', part
         rendered = f'{kind} {content}'
-        if kind not in choices:
+        if kind not in groups:
             order.append(kind)
-            choices[kind] = (priorities.get(qualifier, 0), position, rendered)
-        elif priorities.get(qualifier, 0) > choices[kind][0]:
-            choices[kind] = (priorities.get(qualifier, 0), position, rendered)
-    return '; '.join(choices[kind][2] for kind in order)
+            groups[kind] = []
+        groups[kind].append((
+            priorities.get(qualifier, 0), position, rendered, bool(qualifier)
+        ))
+
+    output: list[str] = []
+    seen: set[str] = set()
+    for kind in order:
+        items = groups[kind]
+        qualified = [item for item in items if item[3]]
+        selected = [max(qualified, key=lambda item: (item[0], -item[1]))] if qualified else items
+        for _, _, rendered, _ in selected:
+            key = rendered.casefold()
+            if key not in seen:
+                seen.add(key)
+                output.append(rendered)
+    return '; '.join(output)
+
 
 
 class CleanModel(BaseModel):
@@ -137,6 +149,7 @@ class EditionInput(CleanModel):
     subtitle: str = Field(default="", max_length=500)
     work_ids: list[int] = Field(default_factory=list, max_length=200)
     work_relations: list[EditionWorkRelation] = Field(default_factory=list, max_length=200)
+    existing_edition_id: int | None = None
     identifier: str = Field(default="", max_length=1000)
     translator: str = Field(default="", max_length=500)
     other_title: str = Field(default="", max_length=1000)
@@ -148,8 +161,9 @@ class EditionInput(CleanModel):
     publisher: str = Field(default="", max_length=500)
     publisher_id: int | None = None
     publisher_canonical: str = ""
-    publication_year: int | None = Field(default=None, ge=0, le=9999)
+    publication_year: int | str | None = None
     series: str = Field(default='', max_length=500)
+    force_new_edition: bool = False
 
     @field_validator("work_ids", mode="before")
     @classmethod
@@ -186,12 +200,24 @@ class EditionInput(CleanModel):
     @field_validator("publication_year", mode="before")
     @classmethod
     def empty_year_is_none(cls, value: object) -> object:
-        return None if value in (None, "") else value
+        if value in (None, ""):
+            return None
+        text = str(value).strip().replace("\u2014", "\u2013").replace("-", "\u2013")
+        parts = text.split("\u2013")
+        if len(parts) not in {1, 2} or not all(part.isdigit() for part in parts):
+            raise ValueError("\u51fa\u7248\u5e74\u4efd\u61c9\u70ba\u5e74\u4efd\u6216\u5e74\u4efd\u7bc4\u570d\uff0c\u4f8b\u5982 2002\u20132003")
+        years = [int(part) for part in parts]
+        if any(year < 0 or year > 9999 for year in years) or years != sorted(years):
+            raise ValueError("\u51fa\u7248\u5e74\u4efd\u7bc4\u570d\u7121\u6548")
+        return years[0] if len(years) == 1 or years[0] == years[1] else f"{years[0]}\u2013{years[1]}"
 
 
 class CopyInput(CleanModel):
     volume_number: str = Field(default="", max_length=100)
     volume_title: str = Field(default="", max_length=500)
+    identifier: str = Field(default="", max_length=1000)
+    effective_identifier: str = ""
+    identifier_transition: Literal["keep", "demote"] | None = None
     acquisition_date: date | None = None
     location: str = Field(default="", max_length=500)
     reading_record: str = Field(default="", max_length=5000)
@@ -204,6 +230,11 @@ class CopyInput(CleanModel):
             value = dict(value)
             value["volume_number"] = value["volume"]
         return value
+
+    @field_validator("identifier", mode="before")
+    @classmethod
+    def normalize_identifiers(cls, value: object) -> object:
+        return normalize_identifier_text(value)
 
     @field_validator("acquisition_date", mode="before")
     @classmethod
@@ -263,6 +294,8 @@ class CopySummary(BaseModel):
     id: int
     volume_number: str
     volume_title: str
+    identifier: str
+    effective_identifier: str
     location: str
 
 
@@ -281,7 +314,7 @@ class EditionSummary(BaseModel):
     identifier: str
     publisher: str
     publisher_canonical: str
-    publication_year: int | None
+    publication_year: int | str | None
     version: str
     series: str
     edition_scripts: str
@@ -326,7 +359,7 @@ class WorkSummary(BaseModel):
     tags: list[TagRecord]
     publishers: list[str]
     locations: list[str]
-    years: list[int]
+    years: list[int | str]
     effective_scripts: list[str]
 
 

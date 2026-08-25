@@ -140,6 +140,35 @@ class ImportAndNormalizationTests(unittest.TestCase):
         self.assertEqual(books[0]['edition']['series'], 'Collected Works')
         self.assertEqual(books[0]['copy']['location'], 'Shelf B')
 
+    def test_csv_requires_explicit_identifier_transition_choice(self) -> None:
+        original_book = make_book()
+        original_book.edition.identifier = "ISBN SET"
+        create_book(original_book)
+
+        rows = preview_csv(
+            b'title,authors,identifier,version,series,publisher,volume,copy_identifier,location\n'
+            b'Shared Title,Shared Author,ISBN SET,2,Collected Works,Raw Press,2,ISBN VOLUME-2,Shelf B\n'
+        )
+        self.assertTrue(rows[0]['identifier_transition_required'])
+        self.assertEqual(rows[0]['transition_edition_identifier'], 'ISBN SET')
+
+        imported = BookInput.model_validate(rows[0]['book'])
+        imported.copy_.identifier_transition = 'keep'
+        csv_import(CsvImportCommit(rows=[CsvImportSelection(
+            row_number=rows[0]['row_number'],
+            book=imported,
+            csv_fields=rows[0]['csv_fields'],
+            action='create',
+        )]))
+
+        books = list_books()
+        self.assertEqual(len(books), 2)
+        self.assertEqual({book['edition']['identifier'] for book in books}, {'ISBN SET'})
+        self.assertEqual(
+            {book['copy']['identifier'] for book in books},
+            {'', 'ISBN VOLUME-2'},
+        )
+
     def test_csv_can_overwrite_an_existing_copy(self) -> None:
         original = create_book(make_book())
         rows = preview_csv(

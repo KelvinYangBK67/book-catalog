@@ -51,6 +51,12 @@ class ListNormalizationTests(unittest.TestCase):
             '統一書號 2018·204',
         )
         self.assertEqual(
+            EditionInput(
+                identifier='ISBN 978-7-5600-3007-4; ISBN 978-7-5600-3319-8'
+            ).identifier,
+            'ISBN 978-7-5600-3007-4; ISBN 978-7-5600-3319-8',
+        )
+        self.assertEqual(
             EditionInput(identifier='識別號 識別號 书号 10019·1998').identifier,
             '书号 10019·1998',
         )
@@ -95,7 +101,9 @@ class ExportTests(unittest.TestCase):
                         identifier='ISSN 1234-5678; ISBN 978-1-2-3 (pbk.)',
                         version='2; Revised', publisher='Test Press',
                     ),
-                    copy=CopyInput(location='Study', reading_record='Read'),
+                    copy=CopyInput(
+                        identifier='ISBN 978-1-2-4', location='Study', reading_record='Read'
+                    ),
                 ))
 
                 json_response = export_json()
@@ -113,10 +121,11 @@ class ExportTests(unittest.TestCase):
             self.assertIn('other_title,other_subtitle', csv_text)
             self.assertIn('edition_title,edition_subtitle', csv_text)
             self.assertIn('work_ids,work_relations,identifier', csv_text)
-            self.assertIn('volume_number,volume_title', csv_text)
+            self.assertIn('volume_number,volume_title,copy_identifier', csv_text)
             self.assertIn('edition_scripts', csv_text)
             self.assertIn('Export Test', csv_text)
             self.assertIn('ISSN 1234-5678; ISBN 978-1-2-3', csv_text)
+            self.assertIn('ISBN 978-1-2-4', csv_text)
             self.assertIn('Read', csv_text)
 
 

@@ -34,16 +34,15 @@ def publisher_identity(record: Any) -> tuple[str, Any]:
 
 
 def editions_match(left: Any, right: Any) -> bool:
-    left_identifiers = identifier_parts(left)
-    right_identifiers = identifier_parts(right)
-    if left_identifiers and right_identifiers:
-        return bool(left_identifiers & right_identifiers)
+    if bool(_value(left, "force_separate")) or bool(_value(right, "force_separate")):
+        return False
     return (
         _text(_value(left, "title")) == _text(_value(right, "title"))
         and _text(_value(left, "subtitle")) == _text(_value(right, "subtitle"))
+        and _text(_value(left, "edition_scripts")) == _text(_value(right, "edition_scripts"))
+        and _text(_value(left, "translator")) == _text(_value(right, "translator"))
         and _text(_value(left, "version")) == _text(_value(right, "version"))
         and publisher_identity(left) == publisher_identity(right)
-        and _value(left, "publication_year") == _value(right, "publication_year")
         and _text(_value(left, "series")) == _text(_value(right, "series"))
     )
 

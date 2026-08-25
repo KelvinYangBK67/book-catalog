@@ -19,13 +19,128 @@ def natural_volume_key(value: str) -> tuple[object, ...]:
     return (1, text.casefold())
 
 
+def publication_year_bounds(value: object) -> tuple[int | None, int | None]:
+    if value in (None, ""):
+        return None, None
+    parts = str(value).replace("\u2014", "\u2013").replace("-", "\u2013").split("\u2013")
+    years = [int(part) for part in parts]
+    return years[0], years[-1]
+
+
+def publication_year_display(start: int | None, end: int | None) -> int | str | None:
+    if start is None:
+        return None
+    if end is None or end == start:
+        return start
+    return f"{start}\u2013{end}"
+
+
+def merge_publication_years(
+    current_start: int | None,
+    current_end: int | None,
+    incoming: object,
+) -> tuple[int | None, int | None]:
+    incoming_start, incoming_end = publication_year_bounds(incoming)
+    years = [
+        year for year in (current_start, current_end, incoming_start, incoming_end)
+        if year is not None
+    ]
+    return (min(years), max(years)) if years else (None, None)
+
+
+def merge_semicolon_values(current: str, incoming: str) -> str:
+    values: list[str] = []
+    seen: set[str] = set()
+    for raw in (current, incoming):
+        for value in str(raw or "").split(";"):
+            value = value.strip()
+            key = value.casefold()
+            if value and key not in seen:
+                seen.add(key)
+                values.append(value)
+    return "; ".join(values)
+
+
+class CopyIdentifierTransitionRequired(ValueError):
+    def __init__(self, edition_id: int, edition_identifier: str) -> None:
+        super().__init__("首次填入不同的冊級識別號，需要選擇是否下沉 Edition 識別號")
+        self.edition_id = edition_id
+        self.edition_identifier = edition_identifier
+
+
+def _apply_copy_identifier_transition(
+    connection: Connection,
+    edition_id: int,
+    copy: CopyInput,
+    *,
+    existing_copy_id: int | None = None,
+    additional_copies: int = 1,
+) -> None:
+    edition = connection.execute(
+        "SELECT identifier FROM editions WHERE id = ?", (edition_id,)
+    ).fetchone()
+    if not edition:
+        return
+    edition_identifier = str(edition["identifier"] or "").strip()
+    copy_identifier = str(copy.identifier or "").strip()
+    if (
+        not edition_identifier
+        or not copy_identifier
+        or edition_identifier.casefold() == copy_identifier.casefold()
+    ):
+        return
+
+    existing_count = connection.execute(
+        "SELECT COUNT(*) FROM copies WHERE edition_id = ?", (edition_id,)
+    ).fetchone()[0]
+    total_count = existing_count + (0 if existing_copy_id is not None else additional_copies)
+    if total_count < 2:
+        return
+
+    if existing_copy_id is not None:
+        current = connection.execute(
+            "SELECT identifier FROM copies WHERE id = ? AND edition_id = ?",
+            (existing_copy_id, edition_id),
+        ).fetchone()
+        if current and str(current["identifier"] or "").strip() and (
+            str(current["identifier"]).strip().casefold() != edition_identifier.casefold()
+        ):
+            return
+
+    parameters: list[object] = [edition_id, edition_identifier]
+    exclude = ""
+    if existing_copy_id is not None:
+        exclude = " AND id <> ?"
+        parameters.append(existing_copy_id)
+    already_distinct = connection.execute(
+        """SELECT 1 FROM copies
+           WHERE edition_id = ? AND TRIM(identifier) <> ''
+             AND identifier <> ? COLLATE NOCASE""" + exclude + " LIMIT 1",
+        parameters,
+    ).fetchone()
+    if already_distinct:
+        return
+
+    if copy.identifier_transition is None:
+        raise CopyIdentifierTransitionRequired(edition_id, edition_identifier)
+    if copy.identifier_transition == "demote":
+        connection.execute(
+            "UPDATE copies SET identifier = ? WHERE edition_id = ? AND identifier = ''",
+            (edition_identifier, edition_id),
+        )
+        connection.execute(
+            "UPDATE editions SET identifier = '' WHERE id = ?", (edition_id,)
+        )
+
+
 SELECT_BOOK = """
 SELECT
-    c.id AS copy_id, c.volume_number, c.volume_title, c.acquisition_date, c.location, c.reading_record,
+    c.id AS copy_id, c.volume_number, c.volume_title, c.identifier AS copy_identifier,
+    c.acquisition_date, c.location, c.reading_record,
     e.id AS edition_id, e.title AS edition_title, e.subtitle AS edition_subtitle, e.identifier, e.translator, e.other_title, e.other_subtitle, e.translated_title,
     e.translated_subtitle, e.edition_scripts, e.version, e.series, e.publisher,
     e.publisher_id, COALESCE(p.canonical_name, '') AS publisher_canonical,
-    e.publication_year,
+    e.publication_year, e.publication_year_end,
     (SELECT GROUP_CONCAT(work_id) FROM (
         SELECT work_id FROM edition_works WHERE edition_id = e.id ORDER BY position
     )) AS edition_work_ids_csv,
@@ -65,11 +180,15 @@ def _book_record(row: Row, connection: Connection) -> dict:
             "publisher": row["publisher"],
             "publisher_id": row["publisher_id"],
             "publisher_canonical": row["publisher_canonical"],
-            "publication_year": row["publication_year"],
+            "publication_year": publication_year_display(
+                row["publication_year"], row["publication_year_end"]
+            ),
         },
         "copy": {
             "volume_number": row["volume_number"],
             "volume_title": row["volume_title"],
+            "identifier": row["copy_identifier"],
+            "effective_identifier": row["copy_identifier"] or row["identifier"],
             "acquisition_date": row["acquisition_date"],
             "location": row["location"],
             "reading_record": row["reading_record"],
@@ -419,11 +538,24 @@ def _set_work_edition_relations(
 
 
 def _find_or_create_edition(connection: Connection, work_id: int, edition: EditionInput) -> int:
+    if edition.existing_edition_id is not None:
+        existing = connection.execute(
+            """SELECT e.id FROM editions e
+               JOIN edition_works ew ON ew.edition_id = e.id
+               WHERE e.id = ? AND ew.work_id = ?""",
+            (edition.existing_edition_id, work_id),
+        ).fetchone()
+        if not existing:
+            raise ValueError("指定的既有 Edition 不存在或未關聯此 Work")
+        return int(existing["id"])
     publisher_id = _resolve_publisher(connection, edition.publisher, edition.publisher_id)
+    year_start, year_end = publication_year_bounds(edition.publication_year)
     values = (
-        work_id, edition.title, edition.subtitle, edition.identifier, edition.translator, edition.other_title, edition.other_subtitle,
-        edition.translated_title, edition.translated_subtitle, edition.edition_scripts,
-        edition.version, edition.series, edition.publisher, publisher_id, edition.publication_year,
+        work_id, edition.title, edition.subtitle, edition.identifier, edition.translator,
+        edition.other_title, edition.other_subtitle, edition.translated_title,
+        edition.translated_subtitle, edition.edition_scripts, edition.version, edition.series,
+        edition.publisher, publisher_id, year_start, year_end,
+        int(edition.force_new_edition),
     )
     candidate = dict(edition.model_dump())
     candidate["publisher_id"] = publisher_id
@@ -435,14 +567,18 @@ def _find_or_create_edition(connection: Connection, work_id: int, edition: Editi
            WHERE ew.work_id = ? ORDER BY e.id""",
         (work_id,),
     ).fetchall()
-    row = find_matching_edition(rows, candidate)
+    row = None if edition.force_new_edition else find_matching_edition(rows, candidate)
     if row:
         _merge_edition_work_relations(connection, row["id"], _relations_from_input(work_id, edition))
+        merged_identifier = merge_semicolon_values(row["identifier"], edition.identifier)
+        merged_year_start, merged_year_end = merge_publication_years(
+            row["publication_year"], row["publication_year_end"], edition.publication_year
+        )
         connection.execute(
             """UPDATE editions SET
                    title = CASE WHEN title = '' THEN ? ELSE title END,
                    subtitle = CASE WHEN subtitle = '' THEN ? ELSE subtitle END,
-                   identifier = CASE WHEN identifier = '' THEN ? ELSE identifier END,
+                   identifier = ?,
                    translator = CASE WHEN translator = '' THEN ? ELSE translator END,
                    other_title = CASE WHEN other_title = '' THEN ? ELSE other_title END,
                    other_subtitle = CASE WHEN other_subtitle = '' THEN ? ELSE other_subtitle END,
@@ -452,20 +588,23 @@ def _find_or_create_edition(connection: Connection, work_id: int, edition: Editi
                    series = CASE WHEN series = '' THEN ? ELSE series END,
                    publisher = CASE WHEN publisher = '' THEN ? ELSE publisher END,
                    publisher_id = COALESCE(publisher_id, ?),
-                   publication_year = COALESCE(publication_year, ?)
+                   publication_year = ?,
+                   publication_year_end = ?
                WHERE id = ?""",
             (
-                edition.title, edition.subtitle, edition.identifier, edition.translator, edition.other_title, edition.other_subtitle,
-                edition.translated_title, edition.translated_subtitle, edition.edition_scripts,
-                edition.series, edition.publisher, publisher_id, edition.publication_year, row["id"],
+                edition.title, edition.subtitle, merged_identifier, edition.translator,
+                edition.other_title, edition.other_subtitle, edition.translated_title,
+                edition.translated_subtitle, edition.edition_scripts, edition.series,
+                edition.publisher, publisher_id, merged_year_start, merged_year_end, row["id"],
             ),
         )
         return row["id"]
     cursor = connection.execute(
         """INSERT INTO editions
-           (work_id, title, subtitle, identifier, translator, other_title, other_subtitle, translated_title, translated_subtitle,
-            edition_scripts, version, series, publisher, publisher_id, publication_year)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+           (work_id, title, subtitle, identifier, translator, other_title, other_subtitle,
+            translated_title, translated_subtitle, edition_scripts, version, series,
+            publisher, publisher_id, publication_year, publication_year_end, force_separate)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         values,
     )
     edition_id = int(cursor.lastrowid)
@@ -488,14 +627,17 @@ def create_book(book: BookInput, path: Path | None = None) -> dict:
     with transaction(path) as connection:
         work_id = _find_or_create_work(connection, book.work)
         edition_id = _find_or_create_edition(connection, work_id, book.edition)
+        _apply_copy_identifier_transition(connection, edition_id, book.copy_)
         cursor = connection.execute(
             """INSERT INTO copies
-               (edition_id, volume_number, volume_title, acquisition_date, location, reading_record)
-               VALUES (?, ?, ?, ?, ?, ?)""",
+               (edition_id, volume_number, volume_title, identifier,
+                acquisition_date, location, reading_record)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
             (
                 edition_id,
                 book.copy_.volume_number,
                 book.copy_.volume_title,
+                book.copy_.identifier,
                 book.copy_.acquisition_date.isoformat() if book.copy_.acquisition_date else None,
                 book.copy_.location,
                 book.copy_.reading_record,
@@ -512,6 +654,10 @@ def create_books_batch(batch: BookBatchInput, path: Path | None = None) -> list[
     with transaction(path) as connection:
         work_id = _find_or_create_work(connection, batch.work)
         edition_id = _find_or_create_edition(connection, work_id, batch.edition)
+        _apply_copy_identifier_transition(
+            connection, edition_id, batch.copy_,
+            additional_copies=len(batch.volume_numbers),
+        )
         seen: set[tuple[str, str]] = set()
         for index, volume_number in enumerate(batch.volume_numbers):
             volume_title = batch.volume_titles[index] if index < len(batch.volume_titles) else ""
@@ -521,10 +667,11 @@ def create_books_batch(batch: BookBatchInput, path: Path | None = None) -> list[
             seen.add(volume_key)
             cursor = connection.execute(
                 """INSERT INTO copies
-                   (edition_id, volume_number, volume_title, acquisition_date, location, reading_record)
-                   VALUES (?, ?, ?, ?, ?, ?)""",
+                   (edition_id, volume_number, volume_title, identifier,
+                    acquisition_date, location, reading_record)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
                 (
-                    edition_id, volume_number, volume_title,
+                    edition_id, volume_number, volume_title, batch.copy_.identifier,
                     batch.copy_.acquisition_date.isoformat() if batch.copy_.acquisition_date else None,
                     batch.copy_.location, batch.copy_.reading_record,
                 ),
@@ -567,6 +714,7 @@ def list_books(query: str = "", path: Path | None = None) -> list[dict]:
                    OR p.canonical_name LIKE ? COLLATE NOCASE
                    OR EXISTS (SELECT 1 FROM publisher_aliases pa
                               WHERE pa.publisher_id = e.publisher_id AND pa.alias LIKE ? COLLATE NOCASE)
+                   OR c.identifier LIKE ? COLLATE NOCASE
                    OR c.volume_number LIKE ? COLLATE NOCASE OR c.volume_title LIKE ? COLLATE NOCASE
                    OR c.acquisition_date LIKE ? COLLATE NOCASE
                    OR c.location LIKE ? COLLATE NOCASE OR c.reading_record LIKE ? COLLATE NOCASE
@@ -581,7 +729,7 @@ def list_books(query: str = "", path: Path | None = None) -> list[dict]:
                    OR EXISTS (SELECT 1 FROM work_tags wt JOIN tags t ON t.id = wt.tag_id
                               WHERE wt.work_id = w.id AND t.name LIKE ? COLLATE NOCASE)
             """
-            parameters = (pattern,) * 28
+            parameters = (pattern,) * 29
         sql += " ORDER BY w.title COLLATE NOCASE, e.publication_year IS NULL, e.publication_year, e.id, c.id"
         return [_book_record(row, connection) for row in connection.execute(sql, parameters).fetchall()]
     finally:
@@ -595,7 +743,8 @@ def list_editions(query: str = "", path: Path | None = None) -> list[dict]:
             SELECT e.id, e.title, e.subtitle, e.translated_title,
                    e.translated_subtitle, e.identifier, e.publisher,
                    COALESCE(p.canonical_name, '') AS publisher_canonical,
-                   e.publication_year, e.version, e.series, e.edition_scripts,
+                   e.publication_year, e.publication_year_end,
+                   e.version, e.series, e.edition_scripts,
                    COUNT(DISTINCT c.id) AS copy_count
             FROM editions e
             LEFT JOIN publishers p ON p.id = e.publisher_id
@@ -610,9 +759,11 @@ def list_editions(query: str = "", path: Path | None = None) -> list[dict]:
                    OR e.translated_title LIKE ? COLLATE NOCASE
                    OR e.translated_subtitle LIKE ? COLLATE NOCASE
                    OR e.identifier LIKE ? COLLATE NOCASE
+                   OR c.identifier LIKE ? COLLATE NOCASE
                    OR e.publisher LIKE ? COLLATE NOCASE
                    OR p.canonical_name LIKE ? COLLATE NOCASE
                    OR CAST(e.publication_year AS TEXT) LIKE ? COLLATE NOCASE
+                   OR CAST(e.publication_year_end AS TEXT) LIKE ? COLLATE NOCASE
                    OR e.version LIKE ? COLLATE NOCASE
                    OR e.series LIKE ? COLLATE NOCASE
                    OR EXISTS (
@@ -624,17 +775,21 @@ def list_editions(query: str = "", path: Path | None = None) -> list[dict]:
                               OR w.authors LIKE ? COLLATE NOCASE)
                    )
             """
-            parameters = (pattern,) * 13
+            parameters = (pattern,) * 15
         sql += """
             GROUP BY e.id, e.title, e.subtitle, e.translated_title,
                      e.translated_subtitle, e.identifier, e.publisher,
-                     p.canonical_name, e.publication_year, e.version,
+                     p.canonical_name, e.publication_year, e.publication_year_end,
+                     e.version,
                      e.series, e.edition_scripts
             ORDER BY COALESCE(NULLIF(e.title, ''), NULLIF(e.translated_title, ''), e.id)
                      COLLATE NOCASE, e.id
         """
         records = [dict(row) for row in connection.execute(sql, parameters).fetchall()]
         for record in records:
+            record["publication_year"] = publication_year_display(
+                record["publication_year"], record.pop("publication_year_end")
+            )
             record["work_relations"] = _edition_work_relations(connection, record["id"])
             record["work_ids"] = [
                 relation["work_id"] for relation in record["work_relations"]
@@ -685,6 +840,7 @@ def list_works(query: str = "", path: Path | None = None) -> list[dict]:
                               AND p.canonical_name LIKE ? COLLATE NOCASE)
                    OR EXISTS (SELECT 1 FROM publisher_aliases pa
                               WHERE pa.publisher_id = e.publisher_id AND pa.alias LIKE ? COLLATE NOCASE)
+                   OR c.identifier LIKE ? COLLATE NOCASE
                    OR c.volume_number LIKE ? COLLATE NOCASE OR c.volume_title LIKE ? COLLATE NOCASE
                    OR c.acquisition_date LIKE ? COLLATE NOCASE
                    OR c.location LIKE ? COLLATE NOCASE OR c.reading_record LIKE ? COLLATE NOCASE
@@ -699,7 +855,7 @@ def list_works(query: str = "", path: Path | None = None) -> list[dict]:
                    OR EXISTS (SELECT 1 FROM work_tags wt JOIN tags t ON t.id = wt.tag_id
                               WHERE wt.work_id = w.id AND t.name LIKE ? COLLATE NOCASE)
             """
-            parameters = (pattern,) * 28
+            parameters = (pattern,) * 29
         sql += " GROUP BY w.id, w.title, w.subtitle, w.authors, w.scripts ORDER BY w.title COLLATE NOCASE, w.id"
         records = [dict(row) for row in connection.execute(sql, parameters).fetchall()]
         for record in records:
@@ -719,13 +875,16 @@ def list_works(query: str = "", path: Path | None = None) -> list[dict]:
                    WHERE ew.work_id = ? AND c.location <> '' ORDER BY c.location""",
                 (record["id"],),
             ).fetchall()]
-            record["years"] = [row[0] for row in connection.execute(
-                """SELECT DISTINCT e.publication_year FROM editions e
+            record["years"] = [row for row in connection.execute(
+                """SELECT DISTINCT e.publication_year, e.publication_year_end FROM editions e
                    JOIN edition_works ew ON ew.edition_id = e.id
                    WHERE ew.work_id = ? AND e.publication_year IS NOT NULL
                    ORDER BY e.publication_year""",
                 (record["id"],),
             ).fetchall()]
+            record["years"] = [
+                publication_year_display(row[0], row[1]) for row in record["years"]
+            ]
             script_values: list[str] = []
             for row in connection.execute(
                 """SELECT CASE WHEN TRIM(e.edition_scripts) <> '' THEN e.edition_scripts ELSE ? END
@@ -757,11 +916,12 @@ def get_work(work_id: int, path: Path | None = None) -> dict | None:
                       e.translated_title, e.translated_subtitle, e.edition_scripts,
                       e.version, e.series, e.publisher, e.publisher_id,
                       COALESCE(p.canonical_name, '') AS publisher_canonical,
-                      e.publication_year,
+                      e.publication_year, e.publication_year_end,
                       (SELECT GROUP_CONCAT(work_id) FROM (
                           SELECT work_id FROM edition_works WHERE edition_id = e.id ORDER BY position
                       )) AS edition_work_ids_csv,
-                      c.id AS copy_id, c.volume_number, c.volume_title, c.location
+                      c.id AS copy_id, c.volume_number, c.volume_title,
+                      c.identifier AS copy_identifier, c.location
                FROM editions e
                JOIN edition_works ew ON ew.edition_id = e.id
                JOIN copies c ON c.edition_id = e.id
@@ -791,7 +951,9 @@ def get_work(work_id: int, path: Path | None = None) -> dict | None:
                         "publisher": row["publisher"],
                         "publisher_id": row["publisher_id"],
                         "publisher_canonical": row["publisher_canonical"],
-                        "publication_year": row["publication_year"],
+                        "publication_year": publication_year_display(
+                            row["publication_year"], row["publication_year_end"]
+                        ),
                     },
                     "copies": [],
                 }
@@ -799,7 +961,10 @@ def get_work(work_id: int, path: Path | None = None) -> dict | None:
                 editions.append(group)
             by_id[edition_id]["copies"].append({
                 "id": row["copy_id"], "volume_number": row["volume_number"],
-                "volume_title": row["volume_title"], "location": row["location"],
+                "volume_title": row["volume_title"],
+                "identifier": row["copy_identifier"],
+                "effective_identifier": row["copy_identifier"] or row["identifier"],
+                "location": row["location"],
             })
         for group in editions:
             group["copies"].sort(
@@ -839,6 +1004,9 @@ def update_book(
             return None
         work_id = _find_or_create_work(connection, book.work, replace_tags=True)
         edition_id = _find_or_create_edition(connection, work_id, book.edition)
+        _apply_copy_identifier_transition(
+            connection, edition_id, book.copy_, existing_copy_id=copy_id
+        )
         if overwrite_hierarchy:
             connection.execute(
                 "UPDATE works SET title = ?, subtitle = ?, authors = ?, scripts = ? WHERE id = ?",
@@ -850,18 +1018,19 @@ def update_book(
             publisher_id = _resolve_publisher(
                 connection, book.edition.publisher, book.edition.publisher_id
             )
+            year_start, year_end = publication_year_bounds(book.edition.publication_year)
             connection.execute(
                 """UPDATE editions SET title = ?, subtitle = ?, identifier = ?, translator = ?,
                    other_title = ?, other_subtitle = ?, translated_title = ?, translated_subtitle = ?,
                    edition_scripts = ?, version = ?, series = ?, publisher = ?, publisher_id = ?,
-                   publication_year = ? WHERE id = ?""",
+                   publication_year = ?, publication_year_end = ? WHERE id = ?""",
                 (
                     book.edition.title, book.edition.subtitle, book.edition.identifier,
                     book.edition.translator, book.edition.other_title,
                     book.edition.other_subtitle, book.edition.translated_title,
                     book.edition.translated_subtitle, book.edition.edition_scripts,
                     book.edition.version, book.edition.series, book.edition.publisher,
-                    publisher_id, book.edition.publication_year, edition_id,
+                    publisher_id, year_start, year_end, edition_id,
                 ),
             )
             _set_edition_work_relations(
@@ -869,11 +1038,13 @@ def update_book(
             )
         connection.execute(
             """UPDATE copies SET edition_id = ?, volume_number = ?, volume_title = ?,
-               acquisition_date = ?, location = ?, reading_record = ? WHERE id = ?""",
+               identifier = ?, acquisition_date = ?, location = ?, reading_record = ?
+               WHERE id = ?""",
             (
                 edition_id,
                 book.copy_.volume_number,
                 book.copy_.volume_title,
+                book.copy_.identifier,
                 book.copy_.acquisition_date.isoformat() if book.copy_.acquisition_date else None,
                 book.copy_.location, book.copy_.reading_record, copy_id,
             ),
@@ -949,22 +1120,23 @@ def update_edition_details(
 ) -> dict | None:
     with transaction(path) as connection:
         current = connection.execute(
-            "SELECT work_id FROM editions WHERE id = ?", (edition_id,)
+            "SELECT work_id, force_separate FROM editions WHERE id = ?", (edition_id,)
         ).fetchone()
         if not current:
             return None
         current_work_ids = _edition_work_ids(connection, edition_id)
         publisher_id = _resolve_publisher(connection, edition.publisher, edition.publisher_id)
+        year_start, year_end = publication_year_bounds(edition.publication_year)
         connection.execute(
             """UPDATE editions SET title = ?, subtitle = ?, identifier = ?, translator = ?,
                other_title = ?, other_subtitle = ?, translated_title = ?, translated_subtitle = ?,
                edition_scripts = ?, version = ?, series = ?, publisher = ?, publisher_id = ?,
-               publication_year = ? WHERE id = ?""",
+               publication_year = ?, publication_year_end = ? WHERE id = ?""",
             (
                 edition.title, edition.subtitle, edition.identifier, edition.translator,
                 edition.other_title, edition.other_subtitle, edition.translated_title,
                 edition.translated_subtitle, edition.edition_scripts, edition.version,
-                edition.series, edition.publisher, publisher_id, edition.publication_year,
+                edition.series, edition.publisher, publisher_id, year_start, year_end,
                 edition_id,
             ),
         )
@@ -975,6 +1147,7 @@ def update_edition_details(
         result_work_ids = _edition_work_ids(connection, edition_id)
         candidate = dict(edition.model_dump())
         candidate["publisher_id"] = publisher_id
+        candidate["force_separate"] = current["force_separate"]
         rows = connection.execute(
             """SELECT DISTINCT e.*, COALESCE(p.canonical_name, '') AS publisher_canonical
                FROM editions e
@@ -987,6 +1160,21 @@ def update_edition_details(
         if duplicate:
             _merge_edition_work_relations(
                 connection, duplicate["id"], _edition_work_relations(connection, edition_id)
+            )
+            merged_identifier = merge_semicolon_values(
+                duplicate["identifier"], edition.identifier
+            )
+            merged_year_start, merged_year_end = merge_publication_years(
+                duplicate["publication_year"], duplicate["publication_year_end"],
+                edition.publication_year,
+            )
+            connection.execute(
+                """UPDATE editions SET identifier = ?, publication_year = ?,
+                   publication_year_end = ? WHERE id = ?""",
+                (
+                    merged_identifier, merged_year_start, merged_year_end,
+                    duplicate["id"],
+                ),
             )
             connection.execute(
                 "UPDATE copies SET edition_id = ? WHERE edition_id = ?",
@@ -1004,17 +1192,23 @@ def update_edition_details(
 
 def update_copy_details(copy_id: int, copy: CopyInput, path: Path | None = None) -> dict | None:
     with transaction(path) as connection:
-        cursor = connection.execute(
-            """UPDATE copies SET volume_number = ?, volume_title = ?, acquisition_date = ?,
-               location = ?, reading_record = ? WHERE id = ?""",
+        current = connection.execute(
+            "SELECT edition_id FROM copies WHERE id = ?", (copy_id,)
+        ).fetchone()
+        if not current:
+            return None
+        _apply_copy_identifier_transition(
+            connection, current["edition_id"], copy, existing_copy_id=copy_id
+        )
+        connection.execute(
+            """UPDATE copies SET volume_number = ?, volume_title = ?, identifier = ?,
+               acquisition_date = ?, location = ?, reading_record = ? WHERE id = ?""",
             (
-                copy.volume_number, copy.volume_title,
+                copy.volume_number, copy.volume_title, copy.identifier,
                 copy.acquisition_date.isoformat() if copy.acquisition_date else None,
                 copy.location, copy.reading_record, copy_id,
             ),
         )
-        if cursor.rowcount == 0:
-            return None
     return get_book(copy_id, path)
 
 

@@ -9,7 +9,10 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from .edition_matching import editions_match
-from .repository import create_book, get_book, list_books, list_publishers, update_book
+from .repository import (
+    CopyIdentifierTransitionRequired, create_book, get_book, list_books,
+    list_publishers, update_book,
+)
 from .schemas import BookInput
 
 
@@ -62,11 +65,14 @@ def _book_from_row(row: dict[str, str | None]) -> BookInput:
             'translated_subtitle': _text(row, 'translated_subtitle'),
             'edition_scripts': _text(row, 'edition_scripts') or _text(row, 'translation_script'),
             'publisher': _text(row, 'publisher'),
-            'publication_year': int(year) if year else None,
+            'publication_year': year or None,
+            'force_new_edition': _text(row, 'force_new_edition').casefold()
+                in {'1', 'true', 'yes', 'y'},
         },
         'copy': {
             'volume_number': _text(row, 'volume_number') or _text(row, 'volume'),
             'volume_title': _text(row, 'volume_title'),
+            'identifier': _text(row, 'copy_identifier'),
             'acquisition_date': _text(row, 'acquisition_date') or None,
             'location': _text(row, 'location'),
             'reading_record': _text(row, 'reading_record'),
@@ -96,9 +102,11 @@ CSV_FIELD_PATHS = {
     'translation_script': ('edition', 'edition_scripts'),
     'publisher': ('edition', 'publisher'),
     'publication_year': ('edition', 'publication_year'),
+    'force_new_edition': ('edition', 'force_new_edition'),
     'volume_number': ('copy', 'volume_number'),
     'volume': ('copy', 'volume_number'),
     'volume_title': ('copy', 'volume_title'),
+    'copy_identifier': ('copy', 'identifier'),
     'acquisition_date': ('copy', 'acquisition_date'),
     'location': ('copy', 'location'),
     'reading_record': ('copy', 'reading_record'),
@@ -185,6 +193,23 @@ def preview_csv(content: bytes) -> list[dict]:
             and _key(candidate['book']['work']['authors']) == _key(book.work.authors)
             and editions_match(candidate['book']['edition'], book.edition)
         ]
+        transition_candidate = edition_matches[0] if edition_matches else None
+        transition_edition_identifier = (
+            transition_candidate['book']['edition']['identifier']
+            if transition_candidate else ''
+        )
+        existing_distinct_identifier = any(
+            _key(candidate['book']['copy'].get('identifier', ''))
+            and _key(candidate['book']['copy'].get('identifier', ''))
+                != _key(transition_edition_identifier)
+            for candidate in edition_matches
+        )
+        identifier_transition_required = bool(
+            book.copy_.identifier
+            and transition_edition_identifier
+            and _key(book.copy_.identifier) != _key(transition_edition_identifier)
+            and not existing_distinct_identifier
+        )
         duplicates = [
             {
                 'id': candidate['id'],
@@ -199,6 +224,8 @@ def preview_csv(content: bytes) -> list[dict]:
             'row_number': index,
             'book': book.model_dump(by_alias=True, mode='json'),
             'csv_fields': csv_fields,
+            'identifier_transition_required': identifier_transition_required,
+            'transition_edition_identifier': transition_edition_identifier,
             'matching_copies': duplicates,
             'matching_edition_copies': [
                 {
@@ -236,7 +263,16 @@ def csv_import(payload: CsvImportCommit) -> dict:
     copy_by_row: dict[int, int] = {}
     for selection in payload.rows:
         if selection.action == 'create':
-            copy_id = create_book(selection.book)['id']
+            try:
+                copy_id = create_book(selection.book)['id']
+            except CopyIdentifierTransitionRequired as error:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        f'CSV row {selection.row_number} must choose whether to demote '
+                        f'Edition identifier {error.edition_identifier}'
+                    ),
+                ) from error
             created_ids.append(copy_id)
         else:
             copy_id = selection.target_copy_id
@@ -250,9 +286,19 @@ def csv_import(payload: CsvImportCommit) -> dict:
             book = selection.book
             if selection.csv_fields is not None:
                 book = _merge_csv_overwrite(copy_id, book, selection.csv_fields)
-            if book is None or update_book(
-                copy_id, book, overwrite_hierarchy=selection.csv_fields is not None
-            ) is None:
+            try:
+                updated = book is not None and update_book(
+                    copy_id, book, overwrite_hierarchy=selection.csv_fields is not None
+                )
+            except CopyIdentifierTransitionRequired as error:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        f'CSV row {selection.row_number} must choose whether to demote '
+                        f'Edition identifier {error.edition_identifier}'
+                    ),
+                ) from error
+            if not updated:
                 raise HTTPException(
                     status_code=422,
                     detail=f'Copy #{copy_id} selected by CSV row {selection.row_number} no longer exists',

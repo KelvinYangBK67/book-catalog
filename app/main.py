@@ -13,6 +13,7 @@ from .database import initialize
 from .export import router as export_router
 from .import_csv import router as import_router
 from .repository import (
+    CopyIdentifierTransitionRequired,
     create_book, create_books_batch, create_tag, create_work_record, delete_copy, delete_edition, delete_publisher,
     delete_tag, delete_work, get_book, get_work, list_books, list_editions,
     list_publisher_names, list_publishers, list_tag_violations, list_tags, list_works, normalize_publisher,
@@ -46,6 +47,18 @@ app.include_router(export_router)
 app.include_router(import_router)
 if IMPE_FONTS.is_dir():
     app.mount("/fonts", StaticFiles(directory=IMPE_FONTS), name="fonts")
+
+
+def identifier_transition_response(error: CopyIdentifierTransitionRequired) -> HTTPException:
+    return HTTPException(
+        status_code=409,
+        detail={
+            "code": "copy_identifier_transition_required",
+            "message": str(error),
+            "edition_id": error.edition_id,
+            "edition_identifier": error.edition_identifier,
+        },
+    )
 
 
 @app.get("/", include_in_schema=False)
@@ -126,7 +139,10 @@ def remove_edition(edition_id: int) -> dict:
 
 @app.put("/api/copies/{copy_id}", response_model=BookRecord)
 def edit_copy(copy_id: int, payload: CopyInput) -> dict:
-    record = update_copy_details(copy_id, payload)
+    try:
+        record = update_copy_details(copy_id, payload)
+    except CopyIdentifierTransitionRequired as error:
+        raise identifier_transition_response(error) from error
     if record is None:
         raise HTTPException(status_code=404, detail="找不到此實物冊")
     return record
@@ -211,6 +227,8 @@ def book(copy_id: int) -> dict:
 def add_book(payload: BookInput) -> dict:
     try:
         return create_book(payload)
+    except CopyIdentifierTransitionRequired as error:
+        raise identifier_transition_response(error) from error
     except ValueError as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
 
@@ -219,6 +237,8 @@ def add_book(payload: BookInput) -> dict:
 def add_books_batch(payload: BookBatchInput) -> list[dict]:
     try:
         return create_books_batch(payload)
+    except CopyIdentifierTransitionRequired as error:
+        raise identifier_transition_response(error) from error
     except ValueError as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
 
@@ -227,6 +247,8 @@ def add_books_batch(payload: BookBatchInput) -> list[dict]:
 def edit_book(copy_id: int, payload: BookInput) -> dict:
     try:
         record = update_book(copy_id, payload)
+    except CopyIdentifierTransitionRequired as error:
+        raise identifier_transition_response(error) from error
     except ValueError as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
     if record is None:

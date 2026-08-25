@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>紙上藏書</title>
   <link rel="stylesheet" href="/static/fonts.css?v=1.0.4">
-  <link rel="stylesheet" href="/static/style.css?v=1.0.8">
+  <link rel="stylesheet" href="/static/style.css?v=1.0.9">
 </head>
 <body>
   <header class="topbar">
@@ -74,6 +74,7 @@
         <button class="icon-button" value="cancel" aria-label="關閉" type="button" data-close>×</button>
       </div>
       <input type="hidden" id="copy-id">
+      <input type="hidden" id="existing-edition-id">
 
       <fieldset>
         <legend><span>01</span> 作品信息</legend>
@@ -112,7 +113,8 @@
           <label>系列<input name="edition.series" maxlength="500" placeholder="多項用半角分號 ; 分隔"></label>
           <label>出版社原始名稱<input name="edition.publisher" maxlength="500" list="publisher-suggestions"></label>
           <datalist id="publisher-suggestions"></datalist>
-          <label>出版年份<input name="edition.publication_year" type="number" min="0" max="9999" inputmode="numeric"></label>
+          <label>出版年份<input name="edition.publication_year" inputmode="numeric" maxlength="9" placeholder="例如：2002 或 2002–2003"></label>
+          <label class="wide checkbox-option"><input name="edition.force_new_edition" type="checkbox"> 強制建立獨立 Edition（即使書目字段相同也不自動歸併）</label>
           <label class="wide">識別號<input name="edition.identifier" maxlength="1000" placeholder="多項用半角分號 ; 分隔"></label>
           <label>文種<input name="edition.edition_scripts" maxlength="500" placeholder="留空繼承作品文種；多項用半角分號 ; 分隔"></label>
           <div class="wide paired-title-editor" data-paired-titles
@@ -136,6 +138,7 @@
         <div class="fields two">
           <label data-single-volume>卷冊編號<input name="copy.volume_number" maxlength="100" placeholder="例如：1.2.3"></label>
           <label data-single-volume>卷冊題名<input name="copy.volume_title" maxlength="500" placeholder="例如：總論"></label>
+          <label class="wide">卷冊識別號<input name="copy.identifier" maxlength="1000" placeholder="留空繼承 Edition 識別號；多項用半角分號 ; 分隔"></label>
           <div class="wide batch-fields" data-batch-fields hidden>
             <label>起始卷冊<input name="batch.start" type="number" min="1" step="1" placeholder="1"></label>
             <label>結束卷冊<input name="batch.end" type="number" min="1" step="1" placeholder="20"></label>
@@ -250,7 +253,7 @@
         <label>版本<input name="version" maxlength="200" placeholder="多項用半角分號 ; 分隔"></label>
         <label>系列<input name="series" maxlength="500" placeholder="多項用半角分號 ; 分隔"></label>
         <label>出版社原始名稱<input name="publisher" maxlength="500" list="publisher-suggestions"></label>
-        <label>出版年份<input name="publication_year" type="number" min="0" max="9999"></label>
+        <label>出版年份<input name="publication_year" inputmode="numeric" maxlength="9" placeholder="例如：2002 或 2002–2003"></label>
         <label class="wide">識別號<input name="identifier" maxlength="1000" placeholder="多項用半角分號 ; 分隔"></label>
         <label>文種<input name="edition_scripts" maxlength="500" placeholder="留空繼承作品文種；多項用半角分號 ; 分隔"></label>
         <div class="wide paired-title-editor" data-paired-titles
@@ -273,6 +276,7 @@
       <fieldset><div class="fields two">
         <label>卷冊編號<input name="volume_number" maxlength="100" placeholder="例如：1.2.3"></label>
         <label>卷冊題名<input name="volume_title" maxlength="500" placeholder="例如：總論"></label>
+        <label class="wide">卷冊識別號<input name="identifier" maxlength="1000" placeholder="留空繼承 Edition 識別號；多項用半角分號 ; 分隔"></label>
         <label>取得日期<input name="acquisition_date" type="date"></label>
         <label class="wide">藏書位置<input name="location" maxlength="500"></label>
         <label class="wide">閱讀記錄<textarea name="reading_record" maxlength="5000" rows="4"></textarea></label>
@@ -331,6 +335,6 @@
     </div>
   </dialog>
 
-  <script src="/static/app.js?v=1.0.9" defer></script>
+  <script src="/static/app.js?v=1.0.11" defer></script>
 </body>
 </html>

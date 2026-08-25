@@ -60,10 +60,14 @@ async function request(url, options) {
   const response = await fetch(url, options);
   if (!response.ok) {
     let message = '操作失敗，請稍後再試。';
+    let errorData = {};
     try {
       const body = await response.json();
       if (typeof body.detail === 'string') {
         message = body.detail;
+      } else if (body.detail && typeof body.detail === 'object' && !Array.isArray(body.detail)) {
+        errorData = body.detail;
+        message = body.detail.message || message;
       } else if (Array.isArray(body.detail)) {
         message = body.detail.map((item) => {
           const field = Array.isArray(item.loc) ? item.loc.filter((part) => part !== 'body').join(' → ') : '';
@@ -71,10 +75,31 @@ async function request(url, options) {
         }).join('；');
       }
     } catch (_) { /* response was not JSON */ }
-    throw new Error(message);
+    const error = new Error(message);
+    error.status = response.status;
+    Object.assign(error, errorData);
+    throw error;
   }
   return response.json();
 }
+
+async function requestWithIdentifierDecision(url, options, payload) {
+  try {
+    return await request(url, {...options, body: JSON.stringify(payload)});
+  } catch (error) {
+    if (error.code !== 'copy_identifier_transition_required') throw error;
+    const demote = window.confirm(
+      '這是此多冊 Edition 首次填入不同的冊級識別號。\n\n'
+      + '目前 Edition 識別號：' + error.edition_identifier + '\n\n'
+      + '按「確定」：把原 Edition 識別號下沉到此前繼承它的冊，並清空 Edition 識別號。\n'
+      + '按「取消」：保留 Edition 識別號，與各冊識別號並存。'
+    );
+    const target = payload.copy || payload;
+    target.identifier_transition = demote ? 'demote' : 'keep';
+    return request(url, {...options, body: JSON.stringify(payload)});
+  }
+}
+
 
 async function loadWorks(query = '') {
   list.innerHTML = '<div class="empty">正在整理書架……</div>';
@@ -350,6 +375,8 @@ function buildEditionEntries(records) {
         id: record.id,
         volume_number: record.copy.volume_number,
         volume_title: record.copy.volume_title,
+        identifier: record.copy.identifier,
+        effective_identifier: record.copy.effective_identifier,
         location: record.copy.location
       });
     }
@@ -1031,6 +1058,11 @@ async function openCopy(copyId) {
       + '<section class="detail-section"><h3>03 · 實物冊 #' + activeBook.id + '</h3>' + pairs([
         ['卷冊編號', activeBook.copy.volume_number],
         ['卷冊題名', activeBook.copy.volume_title, true],
+        [
+          activeBook.copy.identifier ? '卷冊識別號' : '識別號（繼承 Edition）',
+          activeBook.copy.effective_identifier,
+          true, true
+        ],
         ['取得日期', activeBook.copy.acquisition_date],
         ['藏書位置', activeBook.copy.location], ['閱讀記錄', activeBook.copy.reading_record, true]
       ]) + '</section>';
@@ -1440,7 +1472,10 @@ function openWorkEditor(work = null) {
 }
 
 
-function openForm(book = null, presetWork = null, presetEdition = null, primaryWorkId = null) {
+function openForm(
+  book = null, presetWork = null, presetEdition = null,
+  primaryWorkId = null, existingEditionId = null
+) {
   form.reset();
   setTagPickerValues(form.querySelector('[data-tag-picker]'));
   form.elements.namedItem('copy-mode').value = 'single';
@@ -1455,6 +1490,8 @@ function openForm(book = null, presetWork = null, presetEdition = null, primaryW
     book ? (book.edition.work_ids?.[0] ?? primaryWorkId) : primaryWorkId
   );
   document.querySelector('#copy-id').value = book?.id ?? '';
+  document.querySelector('#existing-edition-id').value =
+    existingEditionId ?? book?.edition_id ?? '';
   document.querySelector('#form-mode').textContent = book ? '修改實物冊' : '新增實物冊';
   document.querySelector('#form-title').textContent = book ? '修改藏書' : '新增藏書';
   saveButton.textContent = book ? '保存修改' : '保存藏書';
@@ -1502,6 +1539,7 @@ function formPayload() {
     },
     edition: {
       title: get('edition.title'), subtitle: get('edition.subtitle'),
+      existing_edition_id: Number(document.querySelector('#existing-edition-id').value) || null,
       work_relations: editionWorkRelations(form.querySelector('[data-edition-work-links]')),
       identifier: repeatableValue(form, 'edition.identifier'), translator: get('edition.translator'),
       other_title: otherTitles.other_title,
@@ -1512,11 +1550,14 @@ function formPayload() {
       version: repeatableValue(form, 'edition.version', true),
       series: get('edition.series'),
       publisher: get('edition.publisher'), publisher_id: null, publisher_canonical: '',
-      publication_year: year ? Number(year) : null
+      publication_year: year || null,
+      force_new_edition: form.elements.namedItem('edition.force_new_edition').checked
     },
     copy: {
       volume_number: get('copy.volume_number'),
       volume_title: get('copy.volume_title'),
+      identifier: get('copy.identifier'),
+      identifier_transition: null,
       acquisition_date: get('copy.acquisition_date') || null,
       location: get('copy.location'), reading_record: get('copy.reading_record')
     }
@@ -1592,7 +1633,7 @@ document.querySelector('#detail-content').addEventListener('click', async (event
   if (addButton) {
     const group = activeWork.editions.find((item) => item.id === Number(addButton.dataset.addEditionCopy));
     detailDialog.close();
-    openForm(null, activeWork.work, group.edition, activeWork.id);
+    openForm(null, activeWork.work, group.edition, activeWork.id, group.id);
     return;
   }
   const editButton = event.target.closest('[data-edit-edition]');
@@ -1783,7 +1824,7 @@ document.querySelector('#edition-edit-form').addEventListener('submit', async (e
         series: get('series'),
         identifier: repeatableValue(editForm, 'identifier'), publisher: get('publisher'),
         publisher_id: activeEdition.edition.publisher_id, publisher_canonical: activeEdition.edition.publisher_canonical,
-        publication_year: year ? Number(year) : null, translator: get('translator'),
+        publication_year: year || null, translator: get('translator'),
         edition_scripts: get('edition_scripts'),
         other_title: otherTitles.other_title, other_subtitle: otherTitles.other_subtitle,
         translated_title: get('translated_title'), translated_subtitle: get('translated_subtitle')
@@ -1800,14 +1841,15 @@ document.querySelector('#copy-edit-form').addEventListener('submit', async (even
   const editForm = event.currentTarget;
   const get = (name) => editForm.elements.namedItem(name).value.trim();
   try {
-    activeBook = await request(`/api/copies/${activeBook.id}`, {
-      method: 'PUT', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({
-        volume_number: get('volume_number'), volume_title: get('volume_title'),
-        acquisition_date: get('acquisition_date') || null,
-        location: get('location'), reading_record: get('reading_record')
-      })
-    });
+    const payload = {
+      volume_number: get('volume_number'), volume_title: get('volume_title'),
+      identifier: get('identifier'), identifier_transition: null,
+      acquisition_date: get('acquisition_date') || null,
+      location: get('location'), reading_record: get('reading_record')
+    };
+    activeBook = await requestWithIdentifierDecision(`/api/copies/${activeBook.id}`, {
+      method: 'PUT', headers: {'Content-Type': 'application/json'}
+    }, payload);
     copyEditDialog.close();
     copyDialog.close();
     activeWork = await request(`/api/works/${activeWork.id}`);
@@ -1818,7 +1860,10 @@ document.querySelector('#copy-edit-form').addEventListener('submit', async (even
 });
 document.querySelector('#edit-copy-button').addEventListener('click', () => {
   const editForm = document.querySelector('#copy-edit-form');
-  for (const [key, value] of Object.entries(activeBook.copy)) editForm.elements.namedItem(key).value = value ?? '';
+  for (const [key, value] of Object.entries(activeBook.copy)) {
+    const control = editForm.elements.namedItem(key);
+    if (control) control.value = value ?? '';
+  }
   copyEditDialog.showModal();
 });
 document.querySelector('#delete-copy-button').addEventListener('click', async () => {
@@ -1853,15 +1898,14 @@ form.addEventListener('submit', async (event) => {
     const payload = formPayload();
     let saved;
     if (isBatch) {
-      saved = await request('/api/books/batch', {
-        method: 'POST', headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({...payload, ...batchVolumeData()})
-      });
+      const batchPayload = {...payload, ...batchVolumeData()};
+      saved = await requestWithIdentifierDecision('/api/books/batch', {
+        method: 'POST', headers: {'Content-Type': 'application/json'}
+      }, batchPayload);
     } else {
-      saved = await request(id ? '/api/books/' + id : '/api/books', {
-        method: id ? 'PUT' : 'POST', headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify(payload)
-      });
+      saved = await requestWithIdentifierDecision(id ? '/api/books/' + id : '/api/books', {
+        method: id ? 'PUT' : 'POST', headers: {'Content-Type': 'application/json'}
+      }, payload);
     }
     bookDialog.close();
     await loadTags(); await loadPublishers(); await loadWorks(searchInput.value);
@@ -1896,6 +1940,13 @@ function renderImportPreview() {
       <div><strong>${escapeHtml(book.work.title)}</strong>
         <small>${shown(book.work.authors)} · ${shown(book.edition.version)} · 卷冊 ${shown([book.copy.volume_number, book.copy.volume_title].filter(Boolean).join(' · '))}</small>
         <small>${matchText}</small></div>
+      ${row.identifier_transition_required ? `<label>冊級識別號處理
+        <select data-import-identifier-transition="${index}" required>
+          <option value="">請選擇</option>
+          <option value="keep">保留 Edition 識別號並存</option>
+          <option value="demote">下沉「${escapeHtml(row.transition_edition_identifier)}」並清空 Edition 識別號</option>
+        </select>
+      </label>` : ''}
       <label>實物冊處理
         <select data-import-action="${index}" ${matches.length ? '' : 'disabled'}>
           ${matches.map((match) => match.id
@@ -1954,9 +2005,17 @@ document.querySelector('#import-confirm').addEventListener('click', async () => 
     const rows = importRows.map((row, index) => {
       const choice = document.querySelector(`[data-import-action="${index}"]`)?.value ?? 'import';
       const [kind, rawTarget] = choice.split(':');
+      const book = structuredClone(row.book);
+      const transition = document.querySelector(
+        `[data-import-identifier-transition="${index}"]`
+      );
+      if (transition && !transition.value) {
+        throw new Error(`CSV 第 ${row.row_number} 行必須選擇冊級識別號處理方式。`);
+      }
+      if (transition) book.copy.identifier_transition = transition.value;
       return {
         row_number: row.row_number,
-        book: row.book,
+        book,
         csv_fields: row.csv_fields,
         action: kind === 'import' ? 'create' : 'replace',
         target_copy_id: kind === 'copy' ? Number(rawTarget) : null,

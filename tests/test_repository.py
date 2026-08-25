@@ -8,6 +8,7 @@ from pathlib import Path
 
 from app.database import connect, initialize
 from app.repository import (
+    CopyIdentifierTransitionRequired,
     create_book, create_books_batch, create_tag, create_work_record, delete_copy, delete_edition, delete_publisher,
     delete_tag, delete_work, get_book, get_work, list_books, list_editions, list_publishers,
     list_tag_violations, list_tags, list_works, normalize_publisher, update_book, update_copy_details,
@@ -295,15 +296,16 @@ class RepositoryTests(unittest.TestCase):
             {"初版", "修訂版"},
         )
 
-    def test_same_named_version_with_different_publication_facts_stays_separate(self) -> None:
+    def test_identifier_year_and_volume_do_not_split_an_edition(self) -> None:
         first = sample_book()
-        first.edition.identifier = ""
+        first.edition.identifier = "ISBN 111"
         first.edition.version = "第 2 版"
         first.edition.publication_year = 2002
+        first.copy_.volume_number = "1"
         second = sample_book()
-        second.edition.identifier = ""
+        second.edition.identifier = "ISBN 222"
         second.edition.version = "第 2 版"
-        second.edition.publication_year = 2012
+        second.edition.publication_year = 2003
         second.copy_.volume_number = "2"
 
         create_book(first, self.path)
@@ -311,13 +313,95 @@ class RepositoryTests(unittest.TestCase):
 
         detail = get_work(list_works(path=self.path)[0]["id"], self.path)
         assert detail is not None
-        self.assertEqual(len(detail["editions"]), 2)
+        self.assertEqual(len(detail["editions"]), 1)
+        edition = detail["editions"][0]
+        self.assertEqual(edition["edition"]["identifier"], "ISBN 111; ISBN 222")
+        self.assertEqual(edition["edition"]["publication_year"], "2002–2003")
         self.assertEqual(
-            [item["edition"]["publication_year"] for item in detail["editions"]],
-            [2002, 2012],
+            [copy["volume_number"] for copy in edition["copies"]], ["1", "2"]
         )
 
-    def test_shared_identifier_takes_priority_over_other_edition_facts(self) -> None:
+    def test_copy_identifier_can_keep_shared_edition_identifier(self) -> None:
+        first = sample_book("Volume identifiers coexist")
+        first.edition.identifier = "ISBN SET"
+        first.copy_.identifier = ""
+        first.copy_.volume_number = "1"
+        inherited = create_book(first, self.path)
+
+        second = sample_book("Volume identifiers coexist")
+        second.edition.identifier = "ISBN SET"
+        second.copy_.identifier = "ISBN VOLUME-2"
+        second.copy_.volume_number = "2"
+        with self.assertRaises(CopyIdentifierTransitionRequired):
+            create_book(second, self.path)
+        self.assertEqual(len(list_books(path=self.path)), 1)
+
+        second.copy_.identifier_transition = "keep"
+        explicit = create_book(second, self.path)
+
+        inherited_record = get_book(inherited["id"], self.path)
+        explicit_record = get_book(explicit["id"], self.path)
+        assert inherited_record is not None and explicit_record is not None
+        self.assertEqual(inherited_record["copy"]["identifier"], "")
+        self.assertEqual(inherited_record["copy"]["effective_identifier"], "ISBN SET")
+        self.assertEqual(explicit_record["copy"]["identifier"], "ISBN VOLUME-2")
+        self.assertEqual(explicit_record["edition"]["identifier"], "ISBN SET")
+
+        third = sample_book("Volume identifiers coexist")
+        third.edition.identifier = "ISBN SET"
+        third.copy_.identifier = "ISBN VOLUME-3"
+        third.copy_.volume_number = "3"
+        create_book(third, self.path)
+        self.assertEqual(len(list_books(path=self.path)), 3)
+
+    def test_copy_identifier_can_demote_edition_identifier(self) -> None:
+        first = sample_book("Volume identifier demotion")
+        first.edition.identifier = "ISBN SET"
+        first.copy_.identifier = ""
+        first.copy_.volume_number = "1"
+        inherited = create_book(first, self.path)
+
+        second = sample_book("Volume identifier demotion")
+        second.edition.identifier = "ISBN SET"
+        second.copy_.identifier = "ISBN VOLUME-2"
+        second.copy_.identifier_transition = "demote"
+        second.copy_.volume_number = "2"
+        explicit = create_book(second, self.path)
+
+        inherited_record = get_book(inherited["id"], self.path)
+        explicit_record = get_book(explicit["id"], self.path)
+        assert inherited_record is not None and explicit_record is not None
+        self.assertEqual(inherited_record["copy"]["identifier"], "ISBN SET")
+        self.assertEqual(inherited_record["copy"]["effective_identifier"], "ISBN SET")
+        self.assertEqual(explicit_record["copy"]["identifier"], "ISBN VOLUME-2")
+        self.assertEqual(explicit_record["edition"]["identifier"], "")
+
+    def test_editing_first_distinct_copy_identifier_requires_a_decision(self) -> None:
+        first = sample_book("Edit volume identifier")
+        first.edition.identifier = "ISBN SET"
+        first.copy_.volume_number = "1"
+        create_book(first, self.path)
+        second = sample_book("Edit volume identifier")
+        second.edition.identifier = "ISBN SET"
+        second.copy_.volume_number = "2"
+        second_record = create_book(second, self.path)
+
+        changed = CopyInput(
+            volume_number="2", identifier="ISBN VOLUME-2", location="Shelf"
+        )
+        with self.assertRaises(CopyIdentifierTransitionRequired):
+            update_copy_details(second_record["id"], changed, self.path)
+        changed.identifier_transition = "demote"
+        update_copy_details(second_record["id"], changed, self.path)
+
+        books = list_books(path=self.path)
+        self.assertEqual({book["edition"]["identifier"] for book in books}, {""})
+        self.assertEqual(
+            {book["copy"]["identifier"] for book in books},
+            {"ISBN SET", "ISBN VOLUME-2"},
+        )
+
+    def test_shared_identifier_does_not_override_different_version(self) -> None:
         first = sample_book()
         first.edition.version = "初版"
         first.edition.publication_year = 2002
@@ -330,8 +414,49 @@ class RepositoryTests(unittest.TestCase):
 
         detail = get_work(list_works(path=self.path)[0]["id"], self.path)
         assert detail is not None
-        self.assertEqual(len(detail["editions"]), 1)
-        self.assertEqual(len(detail["editions"][0]["copies"]), 2)
+        self.assertEqual(len(detail["editions"]), 2)
+
+    def test_force_new_edition_preserves_identical_editions_across_initialize(self) -> None:
+        first = sample_book()
+        second = sample_book()
+        second.copy_.volume_number = "2"
+        second.edition.force_new_edition = True
+
+        create_book(first, self.path)
+        forced = create_book(second, self.path)
+        initialize(self.path)
+
+        detail = get_work(list_works(path=self.path)[0]["id"], self.path)
+        assert detail is not None
+        self.assertEqual(len(detail["editions"]), 2)
+
+        another_copy = sample_book()
+        another_copy.edition.existing_edition_id = forced["edition_id"]
+        another_copy.copy_.volume_number = "3"
+        create_book(another_copy, self.path)
+        detail = get_work(detail["id"], self.path)
+        assert detail is not None
+        forced_group = next(
+            group for group in detail["editions"] if group["id"] == forced["edition_id"]
+        )
+        self.assertEqual(len(forced_group["copies"]), 2)
+
+    def test_translator_and_edition_scripts_split_editions(self) -> None:
+        first = sample_book()
+        second = sample_book()
+        second.edition.translator = "另一譯者"
+        second.copy_.volume_number = "2"
+        third = sample_book()
+        third.edition.edition_scripts = "藏文"
+        third.copy_.volume_number = "3"
+
+        create_book(first, self.path)
+        create_book(second, self.path)
+        create_book(third, self.path)
+
+        detail = get_work(list_works(path=self.path)[0]["id"], self.path)
+        assert detail is not None
+        self.assertEqual(len(detail["editions"]), 3)
 
     def test_work_matching_ignores_case_and_surrounding_space(self) -> None:
         first = sample_book("Example")
@@ -520,8 +645,9 @@ class RepositoryTests(unittest.TestCase):
         book = sample_book()
         book.edition.version = "珍藏版"
         book.edition.translated_subtitle = "魔幻家族史"
+        book.copy_.identifier = "ISBN COPY-UNIQUE"
         create_book(book, self.path)
-        terms = ["百年", "加西亚", "葉淑吟", "珍藏版", "魔幻家族史", "978957", "皇冠", "2018", "1.2.3", "2024-01-03", "A 架", "已讀"]
+        terms = ["百年", "加西亚", "葉淑吟", "珍藏版", "魔幻家族史", "978957", "COPY-UNIQUE", "皇冠", "2018", "1.2.3", "2024-01-03", "A 架", "已讀"]
         for term in terms:
             with self.subTest(term=term):
                 self.assertEqual(len(list_books(term, self.path)), 1)
@@ -718,6 +844,7 @@ class RepositoryTests(unittest.TestCase):
         first_copy = create_book(sample_book("Independent Work A"), self.path)
         second_book = sample_book("Independent Work B")
         second_book.edition.identifier = "ID-B"
+        second_book.edition.version = "Independent edition"
         create_book(second_book, self.path)
         summaries = {work["title"]: work for work in list_works(path=self.path)}
         first_work_id = summaries["Independent Work A"]["id"]
