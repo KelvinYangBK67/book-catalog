@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>紙上藏書</title>
   <link rel="stylesheet" href="/static/fonts.css?v=1.0.4">
-  <link rel="stylesheet" href="/static/style.css?v=1.0.9">
+  <link rel="stylesheet" href="/static/style.css?v=1.1.0">
 </head>
 <body>
   <header class="topbar">
@@ -57,6 +57,10 @@
             <option value="years">按年份</option>
           </select>
           <span id="book-count" class="count"></span>
+          <div id="group-collapse-controls" class="collapse-toolbar" hidden>
+            <button type="button" class="quiet-button" data-groups-collapse>全部收起</button>
+            <button type="button" class="quiet-button" data-groups-expand>全部展開</button>
+          </div>
         </div>
       </div>
       <div id="notice" class="notice" hidden></div>
@@ -70,25 +74,24 @@
   <dialog id="book-dialog" class="dialog">
     <form id="book-form" method="dialog">
       <div class="dialog-header">
-        <div><p class="eyebrow" id="form-mode">新增實物冊</p><h2 id="form-title">新增藏書</h2></div>
+        <div><p class="eyebrow" id="form-mode">新增實物副本</p><h2 id="form-title">新增藏書</h2></div>
         <button class="icon-button" value="cancel" aria-label="關閉" type="button" data-close>×</button>
       </div>
       <input type="hidden" id="copy-id">
       <input type="hidden" id="existing-edition-id">
 
-      <fieldset>
-        <legend><span>01</span> 作品信息</legend>
-        <div class="fields two">
-          <label class="wide">標題 <em>必填</em><input name="work.title" required maxlength="500"></label>
-          <label class="wide">副標題<input name="work.subtitle" maxlength="500"></label>
-          <label class="wide">作者或相關責任人<input name="work.authors" maxlength="1000" placeholder="多項用半角分號 ; 分隔"></label>
-          <label>文種<input name="work.scripts" maxlength="500" placeholder="多項用半角分號 ; 分隔"></label>
-          <div class="wide tag-picker" data-tag-picker>
+      <fieldset class="form-section">
+        <legend><span>01</span> 作品</legend>
+        <div class="form-grid">
+          <label class="span-7">題名 <em>必填</em><input name="work.title" required maxlength="500"></label>
+          <label class="span-5">副題名<input name="work.subtitle" maxlength="500"></label>
+          <label class="span-8">作者或相關責任人<input name="work.authors" maxlength="1000" placeholder="多項用半角分號 ; 分隔"></label>
+          <label class="span-4">文種<input name="work.scripts" maxlength="500" placeholder="藏文; 漢文"></label>
+          <div class="span-12 tag-picker" data-tag-picker>
             <span class="field-label">標籤</span>
             <div class="tag-picker-chips"></div>
             <div class="tag-picker-entry">
-              <input class="tag-picker-input" maxlength="1000" autocomplete="off"
-                     placeholder="選擇已有標籤或直接輸入；多項用半角分號 ; 分隔">
+              <input class="tag-picker-input" maxlength="1000" autocomplete="off" placeholder="選擇已有標籤或直接輸入新標籤">
               <div class="tag-picker-suggestions" hidden></div>
             </div>
             <select class="tag-id-store" name="work.tag_ids" multiple hidden></select>
@@ -97,59 +100,93 @@
         </div>
       </fieldset>
 
-      <fieldset>
-        <legend><span>02</span> 版本信息</legend>
-        <div class="fields two">
-          <label class="wide">版本題名<input name="edition.title" maxlength="500" placeholder="留空繼承作品題名；獨立出版單位可在此填寫自己的題名"></label>
-          <label class="wide">版本副標題<input name="edition.subtitle" maxlength="500" placeholder="版本題名的副標題"></label>
-          <div class="wide edition-work-links" data-edition-work-links>
-            <span class="field-label">關聯作品</span>
-            <small class="field-help">選「分冊」表示每個 Work 對應一冊，可填冊號；選「同冊收錄」表示多個 Work 位於同一本實體書內。順序即展示順序。</small>
-            <div class="edition-work-link-rows"></div>
-            <button class="repeatable-add" type="button" data-add-edition-work>＋ 關聯已有 Work</button>
-            <p class="edition-work-warning" hidden>多 Work 關聯僅建議用於臨時合刊；若合集本身具有穩定書目身份，請考慮建立單一 Work。</p>
-          </div>
-          <label>版本<input name="edition.version" maxlength="200" placeholder="多項用半角分號 ; 分隔；純數字會轉為第 X 版"></label>
-          <label>系列<input name="edition.series" maxlength="500" placeholder="多項用半角分號 ; 分隔"></label>
-          <label>出版社原始名稱<input name="edition.publisher" maxlength="500" list="publisher-suggestions"></label>
+      <fieldset class="form-section">
+        <legend><span>02</span> 版本</legend>
+        <div class="form-grid">
+          <label class="span-5">出版社<input name="edition.publisher" maxlength="500" list="publisher-suggestions"></label>
           <datalist id="publisher-suggestions"></datalist>
-          <label>出版年份<input name="edition.publication_year" inputmode="numeric" maxlength="9" placeholder="例如：2002 或 2002–2003"></label>
-          <label class="wide checkbox-option"><input name="edition.force_new_edition" type="checkbox"> 強制建立獨立 Edition（即使書目字段相同也不自動歸併）</label>
-          <label class="wide">識別號<input name="edition.identifier" maxlength="1000" placeholder="多項用半角分號 ; 分隔"></label>
-          <label>文種<input name="edition.edition_scripts" maxlength="500" placeholder="留空繼承作品文種；多項用半角分號 ; 分隔"></label>
-          <div class="wide paired-title-editor" data-paired-titles
-               data-title-name="edition.other_title" data-subtitle-name="edition.other_subtitle">
-            <span class="field-label">其他標題</span>
-            <div class="paired-title-rows"></div>
-            <button class="repeatable-add" type="button" data-add-title-pair>＋ 新增其他標題</button>
-          </div>
-          <label class="wide">翻譯標題<input name="edition.translated_title" maxlength="500"></label>
-          <label class="wide">翻譯副標題<input name="edition.translated_subtitle" maxlength="500"></label>
-          <label class="wide">譯者或相關責任人<input name="edition.translator" maxlength="500" placeholder="多項用半角分號 ; 分隔"></label>
+          <label class="span-2">出版年份<input name="edition.publication_year" inputmode="numeric" maxlength="9" placeholder="2002"></label>
+          <label class="span-2">版本<input name="edition.version" maxlength="200" placeholder="第2版"></label>
+          <label class="span-12">識別號<input name="edition.identifier" maxlength="1000" placeholder="ISBN 978-…；多項用半角分號 ; 分隔"></label>
         </div>
+
+        <details class="form-disclosure" data-disclosure>
+          <summary><span data-disclosure-label data-label="更多版本信息">更多版本信息</span></summary>
+          <div class="form-grid disclosure-fields">
+            <label class="span-7">Edition 題名<input name="edition.title" maxlength="500" placeholder="留空繼承 Work 題名"></label>
+            <label class="span-5">Edition 副題名<input name="edition.subtitle" maxlength="500"></label>
+            <label class="span-5">系列<input name="edition.series" maxlength="500"></label>
+            <label class="span-3">文種<input name="edition.edition_scripts" maxlength="500" placeholder="留空繼承 Work"></label>
+            <label class="span-8">譯者或相關責任人<input name="edition.translator" maxlength="500"></label>
+            <label class="span-7">翻譯題名<input name="edition.translated_title" maxlength="500"></label>
+            <label class="span-5">翻譯副題名<input name="edition.translated_subtitle" maxlength="500"></label>
+            <div class="span-12 paired-title-editor" data-paired-titles
+                 data-title-name="edition.other_title" data-subtitle-name="edition.other_subtitle">
+              <span class="field-label">其他題名</span>
+              <div class="paired-title-rows"></div>
+              <button class="repeatable-add" type="button" data-add-title-pair>＋ 新增其他題名</button>
+            </div>
+          </div>
+        </details>
       </fieldset>
 
-      <fieldset>
-        <legend><span>03</span> 實物冊信息</legend>
-        <div class="copy-mode" id="copy-mode-controls">
-          <label><input type="radio" name="copy-mode" value="single" checked> 單冊</label>
-          <label><input type="radio" name="copy-mode" value="batch"> 批量</label>
+      <fieldset class="form-section">
+        <legend><span>03</span> 冊與館藏</legend>
+        <div class="form-grid">
+          <label class="span-5">藏書位置<input name="copy.location" maxlength="500" placeholder="例如：書房 A 架 2 層"></label>
+          <label class="span-3">取得日期<input name="copy.acquisition_date" type="date"></label>
         </div>
-        <div class="fields two">
-          <label data-single-volume>卷冊編號<input name="copy.volume_number" maxlength="100" placeholder="例如：1.2.3"></label>
-          <label data-single-volume>卷冊題名<input name="copy.volume_title" maxlength="500" placeholder="例如：總論"></label>
-          <label class="wide">卷冊識別號<input name="copy.identifier" maxlength="1000" placeholder="留空繼承 Edition 識別號；多項用半角分號 ; 分隔"></label>
-          <div class="wide batch-fields" data-batch-fields hidden>
-            <label>起始卷冊<input name="batch.start" type="number" min="1" step="1" placeholder="1"></label>
-            <label>結束卷冊<input name="batch.end" type="number" min="1" step="1" placeholder="20"></label>
-            <span>或</span>
-            <label class="wide">自訂卷冊編號<input name="batch.volume_numbers" maxlength="5000" placeholder="1; 1.1; 1.2; 2; 3（多項用半角分號 ; 分隔）"></label>
-            <label class="wide">對應卷冊題名<input name="batch.volume_titles" maxlength="5000" placeholder="總論; 上編; 下編（依次對應卷冊編號，可留空）"></label>
+
+        <details class="form-disclosure" data-disclosure>
+          <summary><span data-disclosure-label data-label="冊資料">冊資料</span></summary>
+          <div class="form-grid disclosure-fields">
+            <label class="span-2" data-single-volume>冊號<input name="volume.volume_number" maxlength="100" placeholder="1.2.3"></label>
+            <label class="span-7" data-single-volume>冊名<input name="volume.volume_title" maxlength="500"></label>
           </div>
-          <label>取得日期<input name="copy.acquisition_date" type="date"></label>
-          <label>藏書位置<input name="copy.location" maxlength="500" placeholder="例如：書房 A 架 2 層"></label>
-          <label class="wide">閱讀記錄<textarea name="copy.reading_record" maxlength="5000" rows="4" placeholder="閱讀進度、心得或重讀日期……"></textarea></label>
-        </div>
+        </details>
+
+        <details class="form-disclosure" data-disclosure>
+          <summary><span data-disclosure-label data-label="冊級例外">冊級例外</span></summary>
+          <div class="form-grid disclosure-fields">
+            <label class="span-12">冊級識別號<input name="volume.identifier" maxlength="1000" placeholder="留空繼承 Edition 識別號"></label>
+            <label class="span-3">冊級版本<input name="volume.version" maxlength="200"></label>
+            <label class="span-3">冊級出版年份<input name="volume.publication_year" inputmode="numeric" maxlength="9"></label>
+            <label class="span-8">冊級責任人<input name="volume.responsibility" maxlength="1000" placeholder="會附加到 Edition 責任人"></label>
+          </div>
+        </details>
+
+        <details class="form-disclosure" data-disclosure>
+          <summary><span data-disclosure-label data-label="其他館藏信息">其他館藏信息</span></summary>
+          <div class="form-grid disclosure-fields">
+            <label class="span-12">閱讀記錄<textarea name="copy.reading_record" maxlength="5000" rows="3"></textarea></label>
+          </div>
+        </details>
+
+        <details class="form-disclosure" data-disclosure>
+          <summary><span data-disclosure-label data-label="進階結構">進階結構</span></summary>
+          <div class="disclosure-fields">
+            <div class="edition-work-links" data-edition-work-links>
+              <span class="field-label">關聯作品</span>
+              <small class="field-help">多 Work 關聯僅建議用於臨時合刊；穩定合集請考慮建立單一 Work。</small>
+              <div class="edition-work-link-rows"></div>
+              <button class="repeatable-add" type="button" data-add-edition-work>＋ 關聯已有 Work</button>
+              <p class="edition-work-warning" hidden>多 Work 關聯僅建議用於臨時合刊。</p>
+            </div>
+            <label class="checkbox-option"><input name="edition.force_new_edition" type="checkbox"> 強制建立獨立 Edition</label>
+            <div class="copy-mode" id="copy-mode-controls">
+              <span class="field-label">建立方式</span>
+              <label><input type="radio" name="copy-mode" value="single" checked> 單冊</label>
+              <label><input type="radio" name="copy-mode" value="batch"> 批量建立冊</label>
+            </div>
+            <div class="batch-fields" data-batch-fields hidden>
+              <label>起始冊號<input name="batch.start" type="number" min="1" step="1" placeholder="1"></label>
+              <label>結束冊號<input name="batch.end" type="number" min="1" step="1" placeholder="20"></label>
+              <span>或</span>
+              <label class="span-12">自訂冊號<input name="batch.volume_numbers" maxlength="5000" placeholder="1; 1.1; 1.2; 2"></label>
+              <label class="span-12">對應冊名<input name="batch.volume_titles" maxlength="5000" placeholder="總論; 上編; 下編"></label>
+            </div>
+          </div>
+        </details>
       </fieldset>
 
       <div class="dialog-actions">
@@ -171,7 +208,7 @@
         <button class="primary" type="submit">建立標籤</button>
       </form>
       <div>
-        <p class="eyebrow">EXISTING TAGS</p>
+        <div class="manager-heading"><p class="eyebrow">EXISTING TAGS</p><div class="collapse-toolbar"><button type="button" class="quiet-button" data-tags-collapse>全部收起</button><button type="button" class="quiet-button" data-tags-expand>全部展開</button></div></div>
         <div id="tag-violations" class="tag-violations" hidden></div>
         <div id="tag-tree" class="tag-tree"></div>
       </div>
@@ -193,9 +230,6 @@
     <div id="detail-content"></div>
     <div class="dialog-actions">
       <button class="secondary" type="button" data-detail-close>關閉</button>
-      <button class="danger" type="button" id="delete-work-button">&#21034;&#38500;&#20316;&#21697;</button>
-      <button class="secondary" type="button" id="edit-work-button">修改作品</button>
-      <button class="primary" type="button" id="add-work-copy-button">＋ 新增版本或實物冊</button>
     </div>
   </dialog>
 
@@ -270,31 +304,53 @@
     </form>
   </dialog>
 
+
+  <dialog id="volume-edit-dialog" class="dialog layer-edit-dialog">
+    <form id="volume-edit-form">
+      <div class="dialog-header">
+        <div><p class="eyebrow">VOLUME</p><h2>修改冊資料</h2></div>
+        <button class="icon-button" type="button" data-volume-edit-close aria-label="關閉">×</button>
+      </div>
+      <fieldset><div class="form-grid">
+        <label class="span-2">冊號<input name="volume_number" maxlength="100"></label>
+        <label class="span-7">冊名<input name="volume_title" maxlength="500"></label>
+        <label class="span-12">冊級識別號<input name="identifier" maxlength="1000"></label>
+        <label class="span-3">冊級版本<input name="version" maxlength="200"></label>
+        <label class="span-3">冊級出版年份<input name="publication_year" inputmode="numeric" maxlength="9"></label>
+        <label class="span-8">冊級責任人<input name="responsibility" maxlength="1000"></label>
+      </div></fieldset>
+      <div class="dialog-actions">
+        <button class="secondary" type="button" data-volume-edit-close>取消</button>
+        <button class="primary" type="submit">保存冊資料</button>
+      </div>
+    </form>
+  </dialog>
   <dialog id="copy-edit-dialog" class="dialog layer-edit-dialog">
     <form id="copy-edit-form">
-      <div class="dialog-header"><div><p class="eyebrow">修改實物冊</p><h2>修改實物冊</h2></div><button class="icon-button" type="button" data-copy-edit-close>×</button></div>
-      <fieldset><div class="fields two">
-        <label>卷冊編號<input name="volume_number" maxlength="100" placeholder="例如：1.2.3"></label>
-        <label>卷冊題名<input name="volume_title" maxlength="500" placeholder="例如：總論"></label>
-        <label class="wide">卷冊識別號<input name="identifier" maxlength="1000" placeholder="留空繼承 Edition 識別號；多項用半角分號 ; 分隔"></label>
-        <label>取得日期<input name="acquisition_date" type="date"></label>
-        <label class="wide">藏書位置<input name="location" maxlength="500"></label>
-        <label class="wide">閱讀記錄<textarea name="reading_record" maxlength="5000" rows="4"></textarea></label>
+      <div class="dialog-header">
+        <div><p class="eyebrow">COPY</p><h2 id="copy-edit-title">修改館藏資料</h2></div>
+        <button class="icon-button" type="button" data-copy-edit-close aria-label="關閉">×</button>
+      </div>
+      <fieldset><div class="form-grid">
+        <label class="span-5">藏書位置<input name="location" maxlength="500"></label>
+        <label class="span-3">取得日期<input name="acquisition_date" type="date"></label>
+        <label class="span-12">閱讀記錄<textarea name="reading_record" maxlength="5000" rows="3"></textarea></label>
       </div></fieldset>
-      <div class="dialog-actions"><button class="secondary" type="button" data-copy-edit-close>取消</button><button class="primary" type="submit">保存實物冊</button></div>
+      <div class="dialog-actions">
+        <button class="secondary" type="button" data-copy-edit-close>取消</button>
+        <button class="primary" type="submit">保存館藏資料</button>
+      </div>
     </form>
   </dialog>
 
   <dialog id="copy-dialog" class="dialog detail-dialog">
     <div class="dialog-header">
-      <div><p class="eyebrow">實物冊詳情</p><h2 id="copy-detail-title"></h2></div>
+      <div><p class="eyebrow">實物副本詳情</p><h2 id="copy-detail-title"></h2></div>
       <button class="icon-button" aria-label="關閉" type="button" data-copy-close>×</button>
     </div>
     <div id="copy-detail-content"></div>
     <div class="dialog-actions">
       <button class="secondary" type="button" data-copy-close>關閉</button>
-      <button class="danger" type="button" id="delete-copy-button">&#21034;&#38500;&#23526;&#29289;&#20874;</button>
-      <button class="primary" type="button" id="edit-copy-button">修改資料</button>
     </div>
   </dialog>
 
@@ -313,7 +369,7 @@
         </div>
         <button class="primary" type="submit">建立或更新正規化</button>
       </form>
-      <div id="publisher-list" class="publisher-list"></div>
+      <div class="manager-heading"><p class="eyebrow">PUBLISHERS</p><div class="collapse-toolbar"><button type="button" class="quiet-button" data-publishers-collapse>全部收起</button><button type="button" class="quiet-button" data-publishers-expand>全部展開</button></div></div><div id="publisher-list" class="publisher-list"></div>
     </section>
     <div class="dialog-actions"><button class="secondary" type="button" data-publishers-close>完成</button></div>
   </dialog>
@@ -335,6 +391,6 @@
     </div>
   </dialog>
 
-  <script src="/static/app.js?v=1.0.11" defer></script>
+  <script type="module" src="/static/app.js?v=1.1.0"></script>
 </body>
 </html>

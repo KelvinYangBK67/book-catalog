@@ -1,22 +1,21 @@
 from __future__ import annotations
 
 from pathlib import Path
-import re
 from sqlite3 import Connection, Row
 
 from .database import connect, initialize, transaction
-from .edition_matching import find_matching_edition
-from .schemas import (
-    BookBatchInput, BookInput, CopyInput, EditionInput,
-    PublisherNormalizationInput, TagInput, WorkInput,
+from .admin_repository import (
+    _tags_for_work, create_tag, delete_publisher, delete_tag, list_publisher_names,
+    list_publishers, list_tag_violations, list_tags, list_tags_from_connection,
+    normalize_publisher, update_tag,
 )
-
-
-def natural_volume_key(value: str) -> tuple[object, ...]:
-    text = str(value or "").strip()
-    if re.fullmatch(r"\d+(?:\.\d+)*", text):
-        return (0, *(int(part) for part in text.split(".")))
-    return (1, text.casefold())
+from .edition_matching import editions_match
+from .metadata_resolver import resolve_metadata
+from .work_matching import find_work_candidates
+from .schemas import (
+    BookBatchInput, BookInput, CopyInput, CopyUpdateInput, EditionInput,
+    VolumeInput, WorkInput,
+)
 
 
 def publication_year_bounds(value: object) -> tuple[int | None, int | None]:
@@ -35,109 +34,16 @@ def publication_year_display(start: int | None, end: int | None) -> int | str | 
     return f"{start}\u2013{end}"
 
 
-def merge_publication_years(
-    current_start: int | None,
-    current_end: int | None,
-    incoming: object,
-) -> tuple[int | None, int | None]:
-    incoming_start, incoming_end = publication_year_bounds(incoming)
-    years = [
-        year for year in (current_start, current_end, incoming_start, incoming_end)
-        if year is not None
-    ]
-    return (min(years), max(years)) if years else (None, None)
-
-
-def merge_semicolon_values(current: str, incoming: str) -> str:
-    values: list[str] = []
-    seen: set[str] = set()
-    for raw in (current, incoming):
-        for value in str(raw or "").split(";"):
-            value = value.strip()
-            key = value.casefold()
-            if value and key not in seen:
-                seen.add(key)
-                values.append(value)
-    return "; ".join(values)
-
-
-class CopyIdentifierTransitionRequired(ValueError):
-    def __init__(self, edition_id: int, edition_identifier: str) -> None:
-        super().__init__("首次填入不同的冊級識別號，需要選擇是否下沉 Edition 識別號")
-        self.edition_id = edition_id
-        self.edition_identifier = edition_identifier
-
-
-def _apply_copy_identifier_transition(
-    connection: Connection,
-    edition_id: int,
-    copy: CopyInput,
-    *,
-    existing_copy_id: int | None = None,
-    additional_copies: int = 1,
-) -> None:
-    edition = connection.execute(
-        "SELECT identifier FROM editions WHERE id = ?", (edition_id,)
-    ).fetchone()
-    if not edition:
-        return
-    edition_identifier = str(edition["identifier"] or "").strip()
-    copy_identifier = str(copy.identifier or "").strip()
-    if (
-        not edition_identifier
-        or not copy_identifier
-        or edition_identifier.casefold() == copy_identifier.casefold()
-    ):
-        return
-
-    existing_count = connection.execute(
-        "SELECT COUNT(*) FROM copies WHERE edition_id = ?", (edition_id,)
-    ).fetchone()[0]
-    total_count = existing_count + (0 if existing_copy_id is not None else additional_copies)
-    if total_count < 2:
-        return
-
-    if existing_copy_id is not None:
-        current = connection.execute(
-            "SELECT identifier FROM copies WHERE id = ? AND edition_id = ?",
-            (existing_copy_id, edition_id),
-        ).fetchone()
-        if current and str(current["identifier"] or "").strip() and (
-            str(current["identifier"]).strip().casefold() != edition_identifier.casefold()
-        ):
-            return
-
-    parameters: list[object] = [edition_id, edition_identifier]
-    exclude = ""
-    if existing_copy_id is not None:
-        exclude = " AND id <> ?"
-        parameters.append(existing_copy_id)
-    already_distinct = connection.execute(
-        """SELECT 1 FROM copies
-           WHERE edition_id = ? AND TRIM(identifier) <> ''
-             AND identifier <> ? COLLATE NOCASE""" + exclude + " LIMIT 1",
-        parameters,
-    ).fetchone()
-    if already_distinct:
-        return
-
-    if copy.identifier_transition is None:
-        raise CopyIdentifierTransitionRequired(edition_id, edition_identifier)
-    if copy.identifier_transition == "demote":
-        connection.execute(
-            "UPDATE copies SET identifier = ? WHERE edition_id = ? AND identifier = ''",
-            (edition_identifier, edition_id),
-        )
-        connection.execute(
-            "UPDATE editions SET identifier = '' WHERE id = ?", (edition_id,)
-        )
-
-
 SELECT_BOOK = """
 SELECT
-    c.id AS copy_id, c.volume_number, c.volume_title, c.identifier AS copy_identifier,
-    c.acquisition_date, c.location, c.reading_record,
-    e.id AS edition_id, e.title AS edition_title, e.subtitle AS edition_subtitle, e.identifier, e.translator, e.other_title, e.other_subtitle, e.translated_title,
+    c.id AS copy_id, c.volume_id, c.acquisition_date, c.location, c.reading_record,
+    v.position AS volume_position, v.volume_number, v.volume_title,
+    v.identifier AS volume_identifier, v.version AS volume_version,
+    v.publication_year AS volume_publication_year,
+    v.publication_year_end AS volume_publication_year_end,
+    v.responsibility AS volume_responsibility,
+    e.id AS edition_id, e.title AS edition_title, e.subtitle AS edition_subtitle,
+    e.identifier, e.translator, e.other_title, e.other_subtitle, e.translated_title,
     e.translated_subtitle, e.edition_scripts, e.version, e.series, e.publisher,
     e.publisher_id, COALESCE(p.canonical_name, '') AS publisher_canonical,
     e.publication_year, e.publication_year_end,
@@ -147,16 +53,93 @@ SELECT
     w.id AS work_id, w.title, w.subtitle, w.authors, w.scripts,
     (SELECT GROUP_CONCAT(wt.tag_id) FROM work_tags wt WHERE wt.work_id = w.id) AS tag_ids_csv
 FROM copies c
-JOIN editions e ON e.id = c.edition_id
-JOIN works w ON w.id = e.work_id
+JOIN volumes v ON v.id = c.volume_id
+JOIN editions e ON e.id = v.edition_id
+JOIN edition_works primary_ew
+  ON primary_ew.edition_id = e.id
+ AND primary_ew.position = (
+     SELECT MIN(primary_position.position)
+     FROM edition_works primary_position
+     WHERE primary_position.edition_id = e.id
+ )
+JOIN works w ON w.id = primary_ew.work_id
 LEFT JOIN publishers p ON p.id = e.publisher_id
 """
 
 
+def _resolved_metadata_from_book_row(row: Row, work: Row | None = None) -> dict:
+    work_row = work or row
+    return resolve_metadata(
+        {
+            "title": work_row["title"],
+            "subtitle": work_row["subtitle"],
+            "authors": work_row["authors"],
+            "scripts": work_row["scripts"],
+        },
+        {
+            "title": row["edition_title"],
+            "subtitle": row["edition_subtitle"],
+            "translated_title": row["translated_title"],
+            "translated_subtitle": row["translated_subtitle"],
+            "edition_scripts": row["edition_scripts"],
+            "identifier": row["identifier"],
+            "version": row["version"],
+            "publication_year": row["publication_year"],
+            "publication_year_end": row["publication_year_end"],
+            "translator": row["translator"],
+        },
+        {
+            "volume_title": row["volume_title"],
+            "identifier": row["volume_identifier"],
+            "version": row["volume_version"],
+            "publication_year": row["volume_publication_year"],
+            "publication_year_end": row["volume_publication_year_end"],
+            "responsibility": row["volume_responsibility"],
+        },
+    )
+
+
+def _volume_record(row: Row, work: Row | None = None) -> dict:
+    effective_metadata = _resolved_metadata_from_book_row(row, work)
+    return {
+        "id": row["volume_id"],
+        "edition_id": row["edition_id"],
+        "position": row["volume_position"],
+        "volume_number": row["volume_number"],
+        "volume_title": row["volume_title"],
+        "identifier": row["volume_identifier"],
+        "version": row["volume_version"],
+        "publication_year": publication_year_display(
+            row["volume_publication_year"], row["volume_publication_year_end"]
+        ),
+        "responsibility": row["volume_responsibility"],
+        "effective_metadata": effective_metadata,
+    }
+
+
 def _book_record(row: Row, connection: Connection) -> dict:
+    volume = _volume_record(row)
+    edition_effective_metadata = resolve_metadata(
+        {
+            "title": row["title"], "subtitle": row["subtitle"],
+            "authors": row["authors"], "scripts": row["scripts"],
+        },
+        {
+            "title": row["edition_title"], "subtitle": row["edition_subtitle"],
+            "translated_title": row["translated_title"],
+            "translated_subtitle": row["translated_subtitle"],
+            "edition_scripts": row["edition_scripts"],
+            "identifier": row["identifier"], "version": row["version"],
+            "publication_year": row["publication_year"],
+            "publication_year_end": row["publication_year_end"],
+            "translator": row["translator"],
+        },
+        None,
+    )
     return {
         "id": row["copy_id"],
         "edition_id": row["edition_id"],
+        "volume_id": row["volume_id"],
         "work": {
             "title": row["title"], "subtitle": row["subtitle"],
             "authors": row["authors"], "scripts": row["scripts"],
@@ -184,11 +167,10 @@ def _book_record(row: Row, connection: Connection) -> dict:
                 row["publication_year"], row["publication_year_end"]
             ),
         },
+        "volume": volume,
+        "edition_effective_metadata": edition_effective_metadata,
         "copy": {
-            "volume_number": row["volume_number"],
-            "volume_title": row["volume_title"],
-            "identifier": row["copy_identifier"],
-            "effective_identifier": row["copy_identifier"] or row["identifier"],
+            "volume_id": row["volume_id"],
             "acquisition_date": row["acquisition_date"],
             "location": row["location"],
             "reading_record": row["reading_record"],
@@ -240,23 +222,16 @@ def _set_work_tags(
     )
 
 
-def _find_or_create_work(connection: Connection, work: WorkInput, replace_tags: bool = False) -> int:
-    row = connection.execute(
-        """SELECT id FROM works
-           WHERE title = ? COLLATE NOCASE AND authors = ? COLLATE NOCASE
-           ORDER BY id LIMIT 1""",
-        (work.title, work.authors),
-    ).fetchone()
-    if row:
-        connection.execute(
-            """UPDATE works SET
-                   subtitle = CASE WHEN subtitle = '' THEN ? ELSE subtitle END,
-                   scripts = CASE WHEN scripts = '' THEN ? ELSE scripts END
-               WHERE id = ?""",
-            (work.subtitle, work.scripts, row["id"]),
-        )
-        _set_work_tags(connection, row["id"], work.tag_ids, work.tag_names, replace_tags)
-        return row["id"]
+def find_work_candidates_in_database(
+    connection: Connection, work: WorkInput
+) -> list[Row]:
+    rows = connection.execute(
+        "SELECT id, title, subtitle, authors, scripts FROM works ORDER BY id"
+    ).fetchall()
+    return find_work_candidates(rows, work)
+
+
+def _insert_work(connection: Connection, work: WorkInput) -> int:
     cursor = connection.execute(
         "INSERT INTO works (title, subtitle, authors, scripts) VALUES (?, ?, ?, ?)",
         (work.title, work.subtitle, work.authors, work.scripts),
@@ -264,6 +239,41 @@ def _find_or_create_work(connection: Connection, work: WorkInput, replace_tags: 
     work_id = int(cursor.lastrowid)
     _set_work_tags(connection, work_id, work.tag_ids, work.tag_names, True)
     return work_id
+
+
+def _work_is_safe_to_reuse(
+    connection: Connection, candidate: Row, work: WorkInput
+) -> bool:
+    fields = ("title", "subtitle", "authors", "scripts")
+    if any(
+        str(candidate[field] or "").strip().casefold()
+        != str(getattr(work, field) or "").strip().casefold()
+        for field in fields
+    ):
+        return False
+    assigned = _tags_for_work(connection, int(candidate["id"]))
+    assigned_ids = {tag["id"] for tag in assigned}
+    assigned_names = {str(tag["name"]).strip().casefold() for tag in assigned}
+    return (
+        set(work.tag_ids).issubset(assigned_ids)
+        and {
+            name.strip().casefold() for name in work.tag_names if name.strip()
+        }.issubset(assigned_names)
+    )
+
+
+def _reuse_or_create_work(connection: Connection, work: WorkInput) -> int:
+    candidates = find_work_candidates_in_database(connection, work)
+    reusable = next(
+        (
+            candidate for candidate in candidates
+            if _work_is_safe_to_reuse(connection, candidate, work)
+        ),
+        None,
+    )
+    if reusable is not None:
+        return int(reusable["id"])
+    return _insert_work(connection, work)
 
 
 def _resolve_publisher(connection: Connection, raw_name: str, publisher_id: int | None) -> int | None:
@@ -288,16 +298,39 @@ def _resolve_publisher(connection: Connection, raw_name: str, publisher_id: int 
     return None
 
 
+def _resolve_relation_volume_id(
+    connection: Connection,
+    edition_id: int,
+    relation: dict,
+    fallback_volume_id: int | None = None,
+) -> int | None:
+    if relation["relation_type"] == "contained":
+        return None
+    volume_id = relation.get("volume_id")
+    if volume_id is None:
+        volume_id = fallback_volume_id
+    if volume_id is None:
+        raise ValueError("volume relation must reference a Volume id")
+    row = connection.execute(
+        "SELECT id FROM volumes WHERE id = ? AND edition_id = ?",
+        (volume_id, edition_id),
+    ).fetchone()
+    if not row:
+        raise ValueError("Relation Volume does not belong to this Edition")
+    return int(row["id"])
+
+
 def _edition_work_relations(connection: Connection, edition_id: int) -> list[dict]:
     return [
         {
             "work_id": row["work_id"],
             "relation_type": row["relation_type"],
-            "volume_number": row["volume_number"],
+            "volume_id": row["volume_id"],
         }
         for row in connection.execute(
-            """SELECT work_id, relation_type, volume_number
-               FROM edition_works WHERE edition_id = ? ORDER BY position""",
+            """SELECT work_id, relation_type, volume_id
+               FROM edition_works
+               WHERE edition_id = ? ORDER BY position""",
             (edition_id,),
         ).fetchall()
     ]
@@ -322,9 +355,10 @@ def _normalize_edition_work_relations(relations: list) -> list[dict]:
         normalized_relation = {
             "work_id": work_id,
             "relation_type": relation_type,
-            "volume_number": (
-                str(data.get("volume_number") or "").strip()
-                if relation_type == "volume" else ""
+            "volume_id": (
+                int(data["volume_id"])
+                if relation_type == "volume" and data.get("volume_id") is not None
+                else None
             ),
         }
         if work_id in positions:
@@ -355,7 +389,7 @@ def _relations_from_input(work_id: int, edition: EditionInput) -> list[dict]:
             relations.insert(0, {
                 "work_id": work_id,
                 "relation_type": "contained",
-                "volume_number": "",
+                "volume_id": None,
             })
         return relations
     return _normalize_edition_work_relations([
@@ -365,7 +399,10 @@ def _relations_from_input(work_id: int, edition: EditionInput) -> list[dict]:
 
 
 def _set_edition_work_relations(
-    connection: Connection, edition_id: int, relations: list
+    connection: Connection,
+    edition_id: int,
+    relations: list,
+    fallback_volume_ids: list[int] | None = None,
 ) -> None:
     normalized = _normalize_edition_work_relations(relations)
     if not normalized:
@@ -377,21 +414,33 @@ def _set_edition_work_relations(
     ).fetchone()[0]
     if found != len(ordered_ids):
         raise ValueError("Edition 關聯中包含不存在的 Work")
+    fallback_ids = iter(fallback_volume_ids or [])
+    resolved = []
+    for relation in normalized:
+        fallback = (
+            next(fallback_ids, None)
+            if relation["relation_type"] == "volume"
+               and relation.get("volume_id") is None
+            else None
+        )
+        resolved.append({
+            **relation,
+            "volume_id": _resolve_relation_volume_id(
+                connection, edition_id, relation, fallback
+            ),
+        })
     connection.execute("DELETE FROM edition_works WHERE edition_id = ?", (edition_id,))
     connection.executemany(
         """INSERT INTO edition_works
-               (edition_id, work_id, position, relation_type, volume_number)
+               (edition_id, work_id, position, relation_type, volume_id)
            VALUES (?, ?, ?, ?, ?)""",
         [
             (
                 edition_id, relation["work_id"], position,
-                relation["relation_type"], relation["volume_number"],
+                relation["relation_type"], relation["volume_id"],
             )
-            for position, relation in enumerate(normalized)
+            for position, relation in enumerate(resolved)
         ],
-    )
-    connection.execute(
-        "UPDATE editions SET work_id = ? WHERE id = ?", (ordered_ids[0], edition_id)
     )
 
 
@@ -403,40 +452,17 @@ def _set_edition_works(connection: Connection, edition_id: int, work_ids: list[i
     )
 
 
-def _merge_edition_work_relations(
-    connection: Connection, edition_id: int, relations: list
-) -> None:
-    merged = _edition_work_relations(connection, edition_id)
-    incoming = _normalize_edition_work_relations(relations)
-    by_work_id = {relation["work_id"]: index for index, relation in enumerate(merged)}
-    for relation in incoming:
-        index = by_work_id.get(relation["work_id"])
-        if index is None:
-            by_work_id[relation["work_id"]] = len(merged)
-            merged.append(relation)
-        else:
-            merged[index] = relation
-    _set_edition_work_relations(connection, edition_id, merged)
-
-
-def _add_edition_works(connection: Connection, edition_id: int, work_ids: list[int]) -> None:
-    _merge_edition_work_relations(
-        connection,
-        edition_id,
-        [{"work_id": work_id, "relation_type": "contained"} for work_id in work_ids],
-    )
-
-
 def _work_edition_relations(connection: Connection, work_id: int) -> list[dict]:
     return [
         {
             "edition_id": row["edition_id"],
             "relation_type": row["relation_type"],
-            "volume_number": row["volume_number"],
+            "volume_id": row["volume_id"],
         }
         for row in connection.execute(
-            """SELECT edition_id, relation_type, volume_number
-               FROM edition_works WHERE work_id = ? ORDER BY edition_id""",
+            """SELECT edition_id, relation_type, volume_id
+               FROM edition_works
+               WHERE work_id = ? ORDER BY edition_id""",
             (work_id,),
         ).fetchall()
     ]
@@ -456,9 +482,10 @@ def _set_work_edition_relations(
         item = {
             "edition_id": edition_id,
             "relation_type": relation_type,
-            "volume_number": (
-                str(data.get("volume_number") or "").strip()
-                if relation_type == "volume" else ""
+            "volume_id": (
+                int(data["volume_id"])
+                if relation_type == "volume" and data.get("volume_id") is not None
+                else None
             ),
         }
         if edition_id in positions:
@@ -491,21 +518,11 @@ def _set_work_edition_relations(
             "DELETE FROM edition_works WHERE edition_id = ? AND work_id = ?",
             (edition_id, work_id),
         )
-        primary = connection.execute(
-            "SELECT work_id FROM editions WHERE id = ?", (edition_id,)
-        ).fetchone()
-        if primary and primary["work_id"] == work_id:
-            replacement = connection.execute(
-                """SELECT work_id FROM edition_works
-                   WHERE edition_id = ? ORDER BY position LIMIT 1""",
-                (edition_id,),
-            ).fetchone()
-            connection.execute(
-                "UPDATE editions SET work_id = ? WHERE id = ?",
-                (replacement["work_id"], edition_id),
-            )
 
     for item in normalized:
+        resolved_volume_id = _resolve_relation_volume_id(
+            connection, item["edition_id"], item
+        )
         existing = connection.execute(
             "SELECT 1 FROM edition_works WHERE edition_id = ? AND work_id = ?",
             (item["edition_id"], work_id),
@@ -513,10 +530,10 @@ def _set_work_edition_relations(
         if existing:
             connection.execute(
                 """UPDATE edition_works
-                   SET relation_type = ?, volume_number = ?
+                   SET relation_type = ?, volume_id = ?
                    WHERE edition_id = ? AND work_id = ?""",
                 (
-                    item["relation_type"], item["volume_number"],
+                    item["relation_type"], resolved_volume_id,
                     item["edition_id"], work_id,
                 ),
             )
@@ -528,122 +545,281 @@ def _set_work_edition_relations(
         ).fetchone()[0]
         connection.execute(
             """INSERT INTO edition_works
-                   (edition_id, work_id, position, relation_type, volume_number)
+                   (edition_id, work_id, position, relation_type, volume_id)
                VALUES (?, ?, ?, ?, ?)""",
             (
                 item["edition_id"], work_id, position,
-                item["relation_type"], item["volume_number"],
+                item["relation_type"], resolved_volume_id,
             ),
         )
 
 
-def _find_or_create_edition(connection: Connection, work_id: int, edition: EditionInput) -> int:
-    if edition.existing_edition_id is not None:
-        existing = connection.execute(
-            """SELECT e.id FROM editions e
-               JOIN edition_works ew ON ew.edition_id = e.id
-               WHERE e.id = ? AND ew.work_id = ?""",
-            (edition.existing_edition_id, work_id),
-        ).fetchone()
-        if not existing:
-            raise ValueError("指定的既有 Edition 不存在或未關聯此 Work")
-        return int(existing["id"])
-    publisher_id = _resolve_publisher(connection, edition.publisher, edition.publisher_id)
-    year_start, year_end = publication_year_bounds(edition.publication_year)
-    values = (
-        work_id, edition.title, edition.subtitle, edition.identifier, edition.translator,
-        edition.other_title, edition.other_subtitle, edition.translated_title,
-        edition.translated_subtitle, edition.edition_scripts, edition.version, edition.series,
-        edition.publisher, publisher_id, year_start, year_end,
-        int(edition.force_new_edition),
-    )
-    candidate = dict(edition.model_dump())
-    candidate["publisher_id"] = publisher_id
+def find_edition_candidates_in_database(
+    connection: Connection, work_id: int, edition: EditionInput
+) -> list[Row]:
     rows = connection.execute(
-        """SELECT e.*, COALESCE(p.canonical_name, '') AS publisher_canonical
+        """SELECT DISTINCT e.*, COALESCE(p.canonical_name, '') AS publisher_canonical
            FROM editions e
            JOIN edition_works ew ON ew.edition_id = e.id
            LEFT JOIN publishers p ON p.id = e.publisher_id
            WHERE ew.work_id = ? ORDER BY e.id""",
         (work_id,),
     ).fetchall()
-    row = None if edition.force_new_edition else find_matching_edition(rows, candidate)
-    if row:
-        _merge_edition_work_relations(connection, row["id"], _relations_from_input(work_id, edition))
-        merged_identifier = merge_semicolon_values(row["identifier"], edition.identifier)
-        merged_year_start, merged_year_end = merge_publication_years(
-            row["publication_year"], row["publication_year_end"], edition.publication_year
-        )
-        connection.execute(
-            """UPDATE editions SET
-                   title = CASE WHEN title = '' THEN ? ELSE title END,
-                   subtitle = CASE WHEN subtitle = '' THEN ? ELSE subtitle END,
-                   identifier = ?,
-                   translator = CASE WHEN translator = '' THEN ? ELSE translator END,
-                   other_title = CASE WHEN other_title = '' THEN ? ELSE other_title END,
-                   other_subtitle = CASE WHEN other_subtitle = '' THEN ? ELSE other_subtitle END,
-                   translated_title = CASE WHEN translated_title = '' THEN ? ELSE translated_title END,
-                   translated_subtitle = CASE WHEN translated_subtitle = '' THEN ? ELSE translated_subtitle END,
-                   edition_scripts = CASE WHEN edition_scripts = '' THEN ? ELSE edition_scripts END,
-                   series = CASE WHEN series = '' THEN ? ELSE series END,
-                   publisher = CASE WHEN publisher = '' THEN ? ELSE publisher END,
-                   publisher_id = COALESCE(publisher_id, ?),
-                   publication_year = ?,
-                   publication_year_end = ?
-               WHERE id = ?""",
-            (
-                edition.title, edition.subtitle, merged_identifier, edition.translator,
-                edition.other_title, edition.other_subtitle, edition.translated_title,
-                edition.translated_subtitle, edition.edition_scripts, edition.series,
-                edition.publisher, publisher_id, merged_year_start, merged_year_end, row["id"],
-            ),
-        )
-        return row["id"]
+    return [
+        candidate
+        for candidate in rows
+        if editions_match(candidate, edition)
+    ]
+
+
+def _reuse_or_create_edition(
+    connection: Connection, work_id: int, edition: EditionInput
+) -> tuple[int, Row | None]:
+    if edition.existing_edition_id is not None:
+        existing = connection.execute(
+            """SELECT e.*, COALESCE(p.canonical_name, '') AS publisher_canonical
+               FROM editions e
+               JOIN edition_works ew ON ew.edition_id = e.id
+               LEFT JOIN publishers p ON p.id = e.publisher_id
+               WHERE e.id = ? AND ew.work_id = ?""",
+            (edition.existing_edition_id, work_id),
+        ).fetchone()
+        if not existing:
+            raise ValueError("指定的既有 Edition 不存在或未關聯此 Work")
+        return int(existing["id"]), existing
+
+    publisher_id = _resolve_publisher(
+        connection, edition.publisher, edition.publisher_id
+    )
+    candidate_data = dict(edition.model_dump())
+    candidate_data["publisher_id"] = publisher_id
+    candidates = find_edition_candidates_in_database(
+        connection, work_id, EditionInput.model_validate(candidate_data)
+    )
+    if candidates and not edition.force_new_edition:
+        return int(candidates[0]["id"]), candidates[0]
+
+    year_start, year_end = publication_year_bounds(edition.publication_year)
     cursor = connection.execute(
         """INSERT INTO editions
-           (work_id, title, subtitle, identifier, translator, other_title, other_subtitle,
+           (title, subtitle, identifier, translator, other_title, other_subtitle,
             translated_title, translated_subtitle, edition_scripts, version, series,
             publisher, publisher_id, publication_year, publication_year_end, force_separate)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-        values,
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (
+            edition.title, edition.subtitle, edition.identifier,
+            edition.translator, edition.other_title, edition.other_subtitle,
+            edition.translated_title, edition.translated_subtitle,
+            edition.edition_scripts, edition.version, edition.series,
+            edition.publisher, publisher_id, year_start, year_end,
+            int(edition.force_new_edition),
+        ),
     )
     edition_id = int(cursor.lastrowid)
-    _set_edition_work_relations(connection, edition_id, _relations_from_input(work_id, edition))
-    return edition_id
+    return edition_id, None
 
 
-def _cleanup_orphans(connection: Connection, edition_id: int, work_id: int) -> None:
-    connection.execute(
-        "DELETE FROM editions WHERE id = ? AND NOT EXISTS (SELECT 1 FROM copies WHERE edition_id = ?)",
-        (edition_id, edition_id),
+def _volume_for_reused_edition(
+    volume: VolumeInput, edition: EditionInput, existing: Row | None
+) -> VolumeInput:
+    if existing is None:
+        return volume
+    updates: dict[str, object] = {}
+    incoming_identifier = str(edition.identifier or "").strip()
+    existing_identifier = str(existing["identifier"] or "").strip()
+    if (
+        not volume.identifier
+        and incoming_identifier
+        and incoming_identifier.casefold() != existing_identifier.casefold()
+    ):
+        updates["identifier"] = incoming_identifier
+
+    incoming_year = edition.publication_year
+    existing_year = publication_year_display(
+        existing["publication_year"], existing["publication_year_end"]
     )
-    connection.execute(
-        "DELETE FROM works WHERE id = ? AND NOT EXISTS (SELECT 1 FROM edition_works WHERE work_id = ?)",
-        (work_id, work_id),
+    if (
+        volume.publication_year in (None, "")
+        and incoming_year not in (None, "")
+        and str(incoming_year) != str(existing_year)
+    ):
+        updates["publication_year"] = incoming_year
+    return volume.model_copy(update=updates) if updates else volume
+
+
+def _volume_from_row(row: Row) -> dict:
+    effective_metadata = resolve_metadata(
+        {
+            "title": row["work_title"],
+            "subtitle": row["work_subtitle"],
+            "authors": row["work_authors"],
+            "scripts": row["work_scripts"],
+        },
+        {
+            "title": row["edition_title"],
+            "subtitle": row["edition_subtitle"],
+            "translated_title": row["translated_title"],
+            "translated_subtitle": row["translated_subtitle"],
+            "edition_scripts": row["edition_scripts"],
+            "identifier": row["edition_identifier"],
+            "version": row["edition_version"],
+            "publication_year": row["edition_publication_year"],
+            "publication_year_end": row["edition_publication_year_end"],
+            "translator": row["edition_responsibility"],
+        },
+        row,
     )
+    return {
+        "id": row["id"],
+        "edition_id": row["edition_id"],
+        "position": row["position"],
+        "volume_number": row["volume_number"],
+        "volume_title": row["volume_title"],
+        "identifier": row["identifier"],
+        "version": row["version"],
+        "publication_year": publication_year_display(
+            row["publication_year"], row["publication_year_end"]
+        ),
+        "responsibility": row["responsibility"],
+        "effective_metadata": effective_metadata,
+    }
+
+def _volume_input_matches(row: Row, volume: VolumeInput) -> bool:
+    incoming_year = publication_year_bounds(volume.publication_year)
+    comparisons = (
+        (row["identifier"], volume.identifier),
+        (row["version"], volume.version),
+        (row["responsibility"], volume.responsibility),
+    )
+    for current, incoming in comparisons:
+        if str(incoming or "").strip() and (
+            str(current or "").strip().casefold()
+            != str(incoming or "").strip().casefold()
+        ):
+            return False
+    if volume.publication_year not in (None, "") and (
+        row["publication_year"], row["publication_year_end"]
+    ) != incoming_year:
+        return False
+    return True
+
+
+def _insert_volume(
+    connection: Connection, edition_id: int, volume: VolumeInput
+) -> int:
+    position = volume.position
+    if position is None:
+        position = connection.execute(
+            "SELECT COALESCE(MAX(position), -1) + 1 FROM volumes WHERE edition_id = ?",
+            (edition_id,),
+        ).fetchone()[0]
+    elif connection.execute(
+        "SELECT 1 FROM volumes WHERE edition_id = ? AND position = ?",
+        (edition_id, position),
+    ).fetchone():
+        raise ValueError("Volume position already exists in this Edition")
+    year_start, year_end = publication_year_bounds(volume.publication_year)
+    cursor = connection.execute(
+        """INSERT INTO volumes
+               (edition_id, position, volume_number, volume_title, identifier,
+                version, publication_year, publication_year_end, responsibility)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (
+            edition_id, position, volume.volume_number, volume.volume_title,
+            volume.identifier, volume.version, year_start, year_end,
+            volume.responsibility,
+        ),
+    )
+    return int(cursor.lastrowid)
+
+
+def _find_or_create_volume(
+    connection: Connection, edition_id: int, volume: VolumeInput
+) -> int:
+    if volume.id is not None:
+        row = connection.execute(
+            "SELECT id FROM volumes WHERE id = ? AND edition_id = ?",
+            (volume.id, edition_id),
+        ).fetchone()
+        if not row:
+            raise ValueError("Volume does not exist in this Edition")
+        return int(row["id"])
+
+    rows = connection.execute(
+        """SELECT * FROM volumes
+           WHERE edition_id = ? AND volume_number = ? COLLATE NOCASE
+             AND volume_title = ? COLLATE NOCASE
+           ORDER BY position, id""",
+        (edition_id, volume.volume_number, volume.volume_title),
+    ).fetchall()
+    for row in rows:
+        if _volume_input_matches(row, volume):
+            return int(row["id"])
+
+    return _insert_volume(connection, edition_id, volume)
+def _update_volume_row(
+    connection: Connection, volume_id: int, volume: VolumeInput
+) -> None:
+    current = connection.execute(
+        "SELECT edition_id FROM volumes WHERE id = ?", (volume_id,)
+    ).fetchone()
+    if not current:
+        raise ValueError("Volume 不存在")
+    year_start, year_end = publication_year_bounds(volume.publication_year)
+    position = volume.position
+    if position is None:
+        position = connection.execute(
+            "SELECT position FROM volumes WHERE id = ?", (volume_id,)
+        ).fetchone()[0]
+    conflict = connection.execute(
+        """SELECT 1 FROM volumes
+           WHERE edition_id = ? AND position = ? AND id <> ?""",
+        (current["edition_id"], position, volume_id),
+    ).fetchone()
+    if conflict:
+        raise ValueError("Volume position 在此 Edition 中已存在")
+    connection.execute(
+        """UPDATE volumes SET position = ?, volume_number = ?, volume_title = ?,
+               identifier = ?, version = ?, publication_year = ?,
+               publication_year_end = ?, responsibility = ? WHERE id = ?""",
+        (
+            position, volume.volume_number, volume.volume_title, volume.identifier,
+            volume.version, year_start, year_end, volume.responsibility, volume_id,
+        ),
+    )
+
+
+def _insert_copy(connection: Connection, volume_id: int, copy: CopyInput) -> int:
+    cursor = connection.execute(
+        """INSERT INTO copies
+               (volume_id, acquisition_date, location, reading_record)
+           VALUES (?, ?, ?, ?)""",
+        (
+            volume_id,
+            copy.acquisition_date.isoformat() if copy.acquisition_date else None,
+            copy.location,
+            copy.reading_record,
+        ),
+    )
+    return int(cursor.lastrowid)
 
 
 def create_book(book: BookInput, path: Path | None = None) -> dict:
     with transaction(path) as connection:
-        work_id = _find_or_create_work(connection, book.work)
-        edition_id = _find_or_create_edition(connection, work_id, book.edition)
-        _apply_copy_identifier_transition(connection, edition_id, book.copy_)
-        cursor = connection.execute(
-            """INSERT INTO copies
-               (edition_id, volume_number, volume_title, identifier,
-                acquisition_date, location, reading_record)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            (
-                edition_id,
-                book.copy_.volume_number,
-                book.copy_.volume_title,
-                book.copy_.identifier,
-                book.copy_.acquisition_date.isoformat() if book.copy_.acquisition_date else None,
-                book.copy_.location,
-                book.copy_.reading_record,
-            ),
+        work_id = _reuse_or_create_work(connection, book.work)
+        edition_id, existing_edition = _reuse_or_create_edition(
+            connection, work_id, book.edition
         )
-        copy_id = int(cursor.lastrowid)
+        volume_input = _volume_for_reused_edition(
+            book.volume, book.edition, existing_edition
+        )
+        volume_id = _find_or_create_volume(connection, edition_id, volume_input)
+        if existing_edition is None:
+            _set_edition_work_relations(
+                connection, edition_id, _relations_from_input(work_id, book.edition),
+                [volume_id],
+            )
+        copy_id = _insert_copy(connection, volume_id, book.copy_)
     record = get_book(copy_id, path)
     assert record is not None
     return record
@@ -652,31 +828,37 @@ def create_book(book: BookInput, path: Path | None = None) -> dict:
 def create_books_batch(batch: BookBatchInput, path: Path | None = None) -> list[dict]:
     copy_ids: list[int] = []
     with transaction(path) as connection:
-        work_id = _find_or_create_work(connection, batch.work)
-        edition_id = _find_or_create_edition(connection, work_id, batch.edition)
-        _apply_copy_identifier_transition(
-            connection, edition_id, batch.copy_,
-            additional_copies=len(batch.volume_numbers),
+        work_id = _reuse_or_create_work(connection, batch.work)
+        edition_id, existing_edition = _reuse_or_create_edition(
+            connection, work_id, batch.edition
         )
         seen: set[tuple[str, str]] = set()
+        created_volume_ids: list[int] = []
         for index, volume_number in enumerate(batch.volume_numbers):
-            volume_title = batch.volume_titles[index] if index < len(batch.volume_titles) else ""
-            volume_key = (volume_number, volume_title)
+            volume_title = (
+                batch.volume_titles[index] if index < len(batch.volume_titles) else ""
+            )
+            volume_key = (volume_number.casefold(), volume_title.casefold())
             if volume_key in seen:
                 continue
             seen.add(volume_key)
-            cursor = connection.execute(
-                """INSERT INTO copies
-                   (edition_id, volume_number, volume_title, identifier,
-                    acquisition_date, location, reading_record)
-                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                (
-                    edition_id, volume_number, volume_title, batch.copy_.identifier,
-                    batch.copy_.acquisition_date.isoformat() if batch.copy_.acquisition_date else None,
-                    batch.copy_.location, batch.copy_.reading_record,
-                ),
+            volume_data = batch.volume.model_copy(update={
+                "id": None,
+                "position": None,
+                "volume_number": volume_number,
+                "volume_title": volume_title,
+            })
+            volume_data = _volume_for_reused_edition(
+                volume_data, batch.edition, existing_edition
             )
-            copy_ids.append(int(cursor.lastrowid))
+            volume_id = _find_or_create_volume(connection, edition_id, volume_data)
+            created_volume_ids.append(volume_id)
+            copy_ids.append(_insert_copy(connection, volume_id, batch.copy_))
+        if existing_edition is None:
+            _set_edition_work_relations(
+                connection, edition_id, _relations_from_input(work_id, batch.edition),
+                created_volume_ids,
+            )
     return [
         record for copy_id in copy_ids
         if (record := get_book(copy_id, path)) is not None
@@ -714,8 +896,8 @@ def list_books(query: str = "", path: Path | None = None) -> list[dict]:
                    OR p.canonical_name LIKE ? COLLATE NOCASE
                    OR EXISTS (SELECT 1 FROM publisher_aliases pa
                               WHERE pa.publisher_id = e.publisher_id AND pa.alias LIKE ? COLLATE NOCASE)
-                   OR c.identifier LIKE ? COLLATE NOCASE
-                   OR c.volume_number LIKE ? COLLATE NOCASE OR c.volume_title LIKE ? COLLATE NOCASE
+                   OR v.identifier LIKE ? COLLATE NOCASE
+                   OR v.volume_number LIKE ? COLLATE NOCASE OR v.volume_title LIKE ? COLLATE NOCASE
                    OR c.acquisition_date LIKE ? COLLATE NOCASE
                    OR c.location LIKE ? COLLATE NOCASE OR c.reading_record LIKE ? COLLATE NOCASE
                    OR EXISTS (
@@ -745,10 +927,12 @@ def list_editions(query: str = "", path: Path | None = None) -> list[dict]:
                    COALESCE(p.canonical_name, '') AS publisher_canonical,
                    e.publication_year, e.publication_year_end,
                    e.version, e.series, e.edition_scripts,
+                   COUNT(DISTINCT v.id) AS volume_count,
                    COUNT(DISTINCT c.id) AS copy_count
             FROM editions e
             LEFT JOIN publishers p ON p.id = e.publisher_id
-            LEFT JOIN copies c ON c.edition_id = e.id
+            LEFT JOIN volumes v ON v.edition_id = e.id
+            LEFT JOIN copies c ON c.volume_id = v.id
         """
         parameters: tuple[str, ...] = ()
         if query.strip():
@@ -759,7 +943,7 @@ def list_editions(query: str = "", path: Path | None = None) -> list[dict]:
                    OR e.translated_title LIKE ? COLLATE NOCASE
                    OR e.translated_subtitle LIKE ? COLLATE NOCASE
                    OR e.identifier LIKE ? COLLATE NOCASE
-                   OR c.identifier LIKE ? COLLATE NOCASE
+                   OR v.identifier LIKE ? COLLATE NOCASE
                    OR e.publisher LIKE ? COLLATE NOCASE
                    OR p.canonical_name LIKE ? COLLATE NOCASE
                    OR CAST(e.publication_year AS TEXT) LIKE ? COLLATE NOCASE
@@ -794,6 +978,16 @@ def list_editions(query: str = "", path: Path | None = None) -> list[dict]:
             record["work_ids"] = [
                 relation["work_id"] for relation in record["work_relations"]
             ]
+            primary_work = connection.execute(
+                """SELECT w.title, w.subtitle, w.authors, w.scripts
+                   FROM works w
+                   JOIN edition_works ew ON ew.work_id = w.id
+                   WHERE ew.edition_id = ? ORDER BY ew.position LIMIT 1""",
+                (record["id"],),
+            ).fetchone()
+            record["effective_metadata"] = resolve_metadata(
+                primary_work, record, None
+            )
         return records
     finally:
         connection.close()
@@ -801,7 +995,7 @@ def list_editions(query: str = "", path: Path | None = None) -> list[dict]:
 
 def create_work_record(work: WorkInput, path: Path | None = None) -> dict:
     with transaction(path) as connection:
-        work_id = _find_or_create_work(connection, work, replace_tags=True)
+        work_id = _insert_work(connection, work)
         if work.edition_relations is not None:
             _set_work_edition_relations(connection, work_id, work.edition_relations)
     record = get_work(work_id, path)
@@ -815,11 +1009,13 @@ def list_works(query: str = "", path: Path | None = None) -> list[dict]:
         sql = """
             SELECT w.id, w.title, w.subtitle, w.authors, w.scripts,
                    COUNT(DISTINCT e.id) AS edition_count,
+                   COUNT(DISTINCT v.id) AS volume_count,
                    COUNT(DISTINCT c.id) AS copy_count
             FROM works w
             LEFT JOIN edition_works ew ON ew.work_id = w.id
             LEFT JOIN editions e ON e.id = ew.edition_id
-            LEFT JOIN copies c ON c.edition_id = e.id
+            LEFT JOIN volumes v ON v.edition_id = e.id
+            LEFT JOIN copies c ON c.volume_id = v.id
         """
         parameters: tuple[str, ...] = ()
         if query.strip():
@@ -840,8 +1036,8 @@ def list_works(query: str = "", path: Path | None = None) -> list[dict]:
                               AND p.canonical_name LIKE ? COLLATE NOCASE)
                    OR EXISTS (SELECT 1 FROM publisher_aliases pa
                               WHERE pa.publisher_id = e.publisher_id AND pa.alias LIKE ? COLLATE NOCASE)
-                   OR c.identifier LIKE ? COLLATE NOCASE
-                   OR c.volume_number LIKE ? COLLATE NOCASE OR c.volume_title LIKE ? COLLATE NOCASE
+                   OR v.identifier LIKE ? COLLATE NOCASE
+                   OR v.volume_number LIKE ? COLLATE NOCASE OR v.volume_title LIKE ? COLLATE NOCASE
                    OR c.acquisition_date LIKE ? COLLATE NOCASE
                    OR c.location LIKE ? COLLATE NOCASE OR c.reading_record LIKE ? COLLATE NOCASE
                    OR EXISTS (
@@ -870,7 +1066,8 @@ def list_works(query: str = "", path: Path | None = None) -> list[dict]:
             ).fetchall()]
             record["locations"] = [row[0] for row in connection.execute(
                 """SELECT DISTINCT c.location FROM copies c
-                   JOIN editions e ON e.id = c.edition_id
+                   JOIN volumes v ON v.id = c.volume_id
+                   JOIN editions e ON e.id = v.edition_id
                    JOIN edition_works ew ON ew.edition_id = e.id
                    WHERE ew.work_id = ? AND c.location <> '' ORDER BY c.location""",
                 (record["id"],),
@@ -886,13 +1083,19 @@ def list_works(query: str = "", path: Path | None = None) -> list[dict]:
                 publication_year_display(row[0], row[1]) for row in record["years"]
             ]
             script_values: list[str] = []
-            for row in connection.execute(
-                """SELECT CASE WHEN TRIM(e.edition_scripts) <> '' THEN e.edition_scripts ELSE ? END
-                   FROM editions e JOIN edition_works ew ON ew.edition_id = e.id
+            edition_rows = connection.execute(
+                """SELECT e.edition_scripts FROM editions e
+                   JOIN edition_works ew ON ew.edition_id = e.id
                    WHERE ew.work_id = ? ORDER BY e.id""",
-                (record["scripts"], record["id"]),
-            ).fetchall():
-                for value in str(row[0] or "").split(";"):
+                (record["id"],),
+            ).fetchall()
+            if not edition_rows:
+                edition_rows = [{"edition_scripts": ""}]
+            for edition_row in edition_rows:
+                resolved = resolve_metadata(
+                    record, edition_row, None
+                )["scripts"]["value"]
+                for value in str(resolved or "").split(";"):
                     value = value.strip()
                     if value and value not in script_values:
                         script_values.append(value)
@@ -920,24 +1123,31 @@ def get_work(work_id: int, path: Path | None = None) -> dict | None:
                       (SELECT GROUP_CONCAT(work_id) FROM (
                           SELECT work_id FROM edition_works WHERE edition_id = e.id ORDER BY position
                       )) AS edition_work_ids_csv,
-                      c.id AS copy_id, c.volume_number, c.volume_title,
-                      c.identifier AS copy_identifier, c.location
+                      v.id AS volume_id, v.position AS volume_position,
+                      v.volume_number, v.volume_title,
+                      v.identifier AS volume_identifier, v.version AS volume_version,
+                      v.publication_year AS volume_publication_year,
+                      v.publication_year_end AS volume_publication_year_end,
+                      v.responsibility AS volume_responsibility,
+                      c.id AS copy_id, c.acquisition_date,
+                      c.location, c.reading_record
                FROM editions e
                JOIN edition_works ew ON ew.edition_id = e.id
-               JOIN copies c ON c.edition_id = e.id
+               JOIN volumes v ON v.edition_id = e.id
+               LEFT JOIN copies c ON c.volume_id = v.id
                LEFT JOIN publishers p ON p.id = e.publisher_id
                WHERE ew.work_id = ?
-               ORDER BY e.publication_year IS NULL, e.publication_year, e.id, c.id""",
+               ORDER BY e.publication_year IS NULL, e.publication_year, e.id,
+                        v.position, v.id, c.id""",
             (work_id,),
         ).fetchall()
         editions: list[dict] = []
-        by_id: dict[int, dict] = {}
+        by_edition: dict[int, dict] = {}
+        volume_groups: dict[int, dict] = {}
         for row in rows:
             edition_id = row["edition_id"]
-            if edition_id not in by_id:
-                group = {
-                    "id": edition_id,
-                    "edition": {
+            if edition_id not in by_edition:
+                edition_data = {
                         "title": row["edition_title"], "subtitle": row["edition_subtitle"],
                         "work_ids": [int(value) for value in (row["edition_work_ids_csv"] or "").split(",") if value],
                         "work_relations": _edition_work_relations(connection, edition_id),
@@ -954,25 +1164,36 @@ def get_work(work_id: int, path: Path | None = None) -> dict | None:
                         "publication_year": publication_year_display(
                             row["publication_year"], row["publication_year_end"]
                         ),
-                    },
+                    }
+                group = {
+                    "id": edition_id,
+                    "edition": edition_data,
+                    "effective_metadata": resolve_metadata(work, edition_data, None),
+                    "volumes": [],
+                }
+                by_edition[edition_id] = group
+                editions.append(group)
+            group = by_edition[edition_id]
+            volume_id = row["volume_id"]
+            if volume_id not in volume_groups:
+                volume_record = _volume_record(row, work)
+                volume_group = {
+                    "id": volume_id,
+                    "volume": volume_record,
                     "copies": [],
                 }
-                by_id[edition_id] = group
-                editions.append(group)
-            by_id[edition_id]["copies"].append({
-                "id": row["copy_id"], "volume_number": row["volume_number"],
-                "volume_title": row["volume_title"],
-                "identifier": row["copy_identifier"],
-                "effective_identifier": row["copy_identifier"] or row["identifier"],
+                volume_groups[volume_id] = volume_group
+                group["volumes"].append(volume_group)
+            if row["copy_id"] is None:
+                continue
+            summary = {
+                "id": row["copy_id"],
+                "volume_id": volume_id,
+                "acquisition_date": row["acquisition_date"],
                 "location": row["location"],
-            })
-        for group in editions:
-            group["copies"].sort(
-                key=lambda copy: (
-                    natural_volume_key(copy["volume_number"]),
-                    copy["volume_title"].casefold(), copy["id"],
-                )
-            )
+                "reading_record": row["reading_record"],
+            }
+            volume_groups[volume_id]["copies"].append(summary)
         return {
             "id": work["id"],
             "work": {
@@ -996,16 +1217,17 @@ def update_book(
 ) -> dict | None:
     with transaction(path) as connection:
         old = connection.execute(
-            """SELECT c.edition_id, e.work_id FROM copies c
-               JOIN editions e ON e.id = c.edition_id WHERE c.id = ?""",
+            """SELECT c.volume_id, v.edition_id
+               FROM copies c
+               JOIN volumes v ON v.id = c.volume_id
+               WHERE c.id = ?""",
             (copy_id,),
         ).fetchone()
         if not old:
             return None
-        work_id = _find_or_create_work(connection, book.work, replace_tags=True)
-        edition_id = _find_or_create_edition(connection, work_id, book.edition)
-        _apply_copy_identifier_transition(
-            connection, edition_id, book.copy_, existing_copy_id=copy_id
+        work_id = _reuse_or_create_work(connection, book.work)
+        edition_id, existing_edition = _reuse_or_create_edition(
+            connection, work_id, book.edition
         )
         if overwrite_hierarchy:
             connection.execute(
@@ -1033,99 +1255,85 @@ def update_book(
                     publisher_id, year_start, year_end, edition_id,
                 ),
             )
+            if existing_edition is not None:
+                _set_edition_work_relations(
+                    connection, edition_id, _relations_from_input(work_id, book.edition)
+                )
+
+        requested_volume = (
+            book.volume if overwrite_hierarchy else _volume_for_reused_edition(
+                book.volume, book.edition, existing_edition
+            )
+        )
+        if requested_volume.id is not None:
+            belongs = connection.execute(
+                "SELECT 1 FROM volumes WHERE id = ? AND edition_id = ?",
+                (requested_volume.id, edition_id),
+            ).fetchone()
+            volume_id = (
+                int(requested_volume.id)
+                if belongs else _find_or_create_volume(
+                    connection, edition_id,
+                    requested_volume.model_copy(update={"id": None, "position": None}),
+                )
+            )
+        else:
+            volume_id = _find_or_create_volume(connection, edition_id, requested_volume)
+        if overwrite_hierarchy:
+            _update_volume_row(
+                connection, volume_id,
+                requested_volume.model_copy(update={"id": volume_id}),
+            )
+        if existing_edition is None:
             _set_edition_work_relations(
-                connection, edition_id, _relations_from_input(work_id, book.edition)
+                connection, edition_id, _relations_from_input(work_id, book.edition),
+                [volume_id],
             )
         connection.execute(
-            """UPDATE copies SET edition_id = ?, volume_number = ?, volume_title = ?,
-               identifier = ?, acquisition_date = ?, location = ?, reading_record = ?
-               WHERE id = ?""",
+            """UPDATE copies SET volume_id = ?, acquisition_date = ?,
+               location = ?, reading_record = ? WHERE id = ?""",
             (
-                edition_id,
-                book.copy_.volume_number,
-                book.copy_.volume_title,
-                book.copy_.identifier,
+                volume_id,
                 book.copy_.acquisition_date.isoformat() if book.copy_.acquisition_date else None,
                 book.copy_.location, book.copy_.reading_record, copy_id,
             ),
         )
-        _cleanup_orphans(connection, old["edition_id"], old["work_id"])
     return get_book(copy_id, path)
 
 
-def update_work_details(work_id: int, work: WorkInput, path: Path | None = None) -> dict | None:
-    merged = False
-    result_id = work_id
+def update_work_details(
+    work_id: int, work: WorkInput, path: Path | None = None
+) -> dict | None:
     with transaction(path) as connection:
-        exists = connection.execute("SELECT id FROM works WHERE id = ?", (work_id,)).fetchone()
+        exists = connection.execute(
+            "SELECT id FROM works WHERE id = ?", (work_id,)
+        ).fetchone()
         if not exists:
             return None
-        duplicate = connection.execute(
-            """SELECT id FROM works WHERE id <> ? AND title = ? COLLATE NOCASE
-               AND authors = ? COLLATE NOCASE ORDER BY id LIMIT 1""",
-            (work_id, work.title, work.authors),
-        ).fetchone()
-        if duplicate:
-            result_id = duplicate["id"]
-            for link in connection.execute(
-                "SELECT edition_id FROM edition_works WHERE work_id = ? ORDER BY edition_id",
-                (work_id,),
-            ).fetchall():
-                edition_id = link["edition_id"]
-                target_exists = connection.execute(
-                    "SELECT 1 FROM edition_works WHERE edition_id = ? AND work_id = ?",
-                    (edition_id, result_id),
-                ).fetchone()
-                if target_exists:
-                    connection.execute(
-                        "DELETE FROM edition_works WHERE edition_id = ? AND work_id = ?",
-                        (edition_id, work_id),
-                    )
-                else:
-                    connection.execute(
-                        "UPDATE edition_works SET work_id = ? WHERE edition_id = ? AND work_id = ?",
-                        (result_id, edition_id, work_id),
-                    )
-            connection.execute(
-                "UPDATE editions SET work_id = ? WHERE work_id = ?", (result_id, work_id)
-            )
-            _set_work_tags(connection, result_id, work.tag_ids, work.tag_names, False)
-            connection.execute("DELETE FROM works WHERE id = ?", (work_id,))
-            merged = True
-        else:
-            connection.execute(
-                "UPDATE works SET title = ?, subtitle = ?, authors = ?, scripts = ? WHERE id = ?",
-                (work.title, work.subtitle, work.authors, work.scripts, work_id),
-            )
-            _set_work_tags(connection, work_id, work.tag_ids, work.tag_names, True)
+        connection.execute(
+            """UPDATE works SET title = ?, subtitle = ?, authors = ?, scripts = ?
+               WHERE id = ?""",
+            (work.title, work.subtitle, work.authors, work.scripts, work_id),
+        )
+        _set_work_tags(connection, work_id, work.tag_ids, work.tag_names, True)
         if work.edition_relations is not None:
-            requested_relations = list(work.edition_relations)
-            if merged:
-                requested_ids = {relation.edition_id for relation in requested_relations}
-                requested_relations = [
-                    *[
-                        relation for relation in _work_edition_relations(connection, result_id)
-                        if relation["edition_id"] not in requested_ids
-                    ],
-                    *requested_relations,
-                ]
-            _set_work_edition_relations(connection, result_id, requested_relations)
-    if merged:
-        initialize(path)
-    return get_work(result_id, path)
-
+            _set_work_edition_relations(
+                connection, work_id, list(work.edition_relations)
+            )
+    return get_work(work_id, path)
 
 def update_edition_details(
     edition_id: int, edition: EditionInput, path: Path | None = None
 ) -> dict | None:
     with transaction(path) as connection:
         current = connection.execute(
-            "SELECT work_id, force_separate FROM editions WHERE id = ?", (edition_id,)
+            "SELECT id FROM editions WHERE id = ?", (edition_id,)
         ).fetchone()
         if not current:
             return None
-        current_work_ids = _edition_work_ids(connection, edition_id)
-        publisher_id = _resolve_publisher(connection, edition.publisher, edition.publisher_id)
+        publisher_id = _resolve_publisher(
+            connection, edition.publisher, edition.publisher_id
+        )
         year_start, year_end = publication_year_bounds(edition.publication_year)
         connection.execute(
             """UPDATE editions SET title = ?, subtitle = ?, identifier = ?, translator = ?,
@@ -1141,105 +1349,263 @@ def update_edition_details(
             ),
         )
         if _use_structured_relations(edition):
-            _set_edition_work_relations(connection, edition_id, edition.work_relations)
+            _set_edition_work_relations(
+                connection, edition_id, edition.work_relations
+            )
         elif edition.work_ids:
             _set_edition_works(connection, edition_id, edition.work_ids)
         result_work_ids = _edition_work_ids(connection, edition_id)
-        candidate = dict(edition.model_dump())
-        candidate["publisher_id"] = publisher_id
-        candidate["force_separate"] = current["force_separate"]
-        rows = connection.execute(
-            """SELECT DISTINCT e.*, COALESCE(p.canonical_name, '') AS publisher_canonical
-               FROM editions e
+    return get_work(result_work_ids[0], path) if result_work_ids else None
+
+def get_volume(volume_id: int, path: Path | None = None) -> dict | None:
+    connection = connect(path)
+    try:
+        row = connection.execute(
+            """SELECT v.*,
+                      e.title AS edition_title, e.subtitle AS edition_subtitle,
+                      e.translated_title, e.translated_subtitle,
+                      e.edition_scripts, e.identifier AS edition_identifier,
+                      e.version AS edition_version,
+                      e.publication_year AS edition_publication_year,
+                      e.publication_year_end AS edition_publication_year_end,
+                      e.translator AS edition_responsibility,
+                      w.title AS work_title, w.subtitle AS work_subtitle,
+                      w.authors AS work_authors, w.scripts AS work_scripts
+               FROM volumes v
+               JOIN editions e ON e.id = v.edition_id
                JOIN edition_works ew ON ew.edition_id = e.id
-               LEFT JOIN publishers p ON p.id = e.publisher_id
-               WHERE ew.work_id = ? ORDER BY e.id""",
-            (result_work_ids[0],),
-        ).fetchall()
-        duplicate = find_matching_edition(rows, candidate, exclude_id=edition_id)
-        if duplicate:
-            _merge_edition_work_relations(
-                connection, duplicate["id"], _edition_work_relations(connection, edition_id)
-            )
-            merged_identifier = merge_semicolon_values(
-                duplicate["identifier"], edition.identifier
-            )
-            merged_year_start, merged_year_end = merge_publication_years(
-                duplicate["publication_year"], duplicate["publication_year_end"],
-                edition.publication_year,
-            )
-            connection.execute(
-                """UPDATE editions SET identifier = ?, publication_year = ?,
-                   publication_year_end = ? WHERE id = ?""",
-                (
-                    merged_identifier, merged_year_start, merged_year_end,
-                    duplicate["id"],
-                ),
-            )
-            connection.execute(
-                "UPDATE copies SET edition_id = ? WHERE edition_id = ?",
-                (duplicate["id"], edition_id),
-            )
-            connection.execute("DELETE FROM editions WHERE id = ?", (edition_id,))
-        for old_work_id in current_work_ids:
-            connection.execute(
-                """DELETE FROM works WHERE id = ?
-                   AND NOT EXISTS (SELECT 1 FROM edition_works WHERE work_id = ?)""",
-                (old_work_id, old_work_id),
-            )
-    return get_work(result_work_ids[0], path)
+                 AND ew.position = (
+                     SELECT MIN(ew_position.position)
+                     FROM edition_works ew_position
+                     WHERE ew_position.edition_id = e.id
+                 )
+               JOIN works w ON w.id = ew.work_id
+               WHERE v.id = ?""",
+            (volume_id,),
+        ).fetchone()
+        return _volume_from_row(row) if row else None
+    finally:
+        connection.close()
 
 
-def update_copy_details(copy_id: int, copy: CopyInput, path: Path | None = None) -> dict | None:
+def create_volume_record(
+    edition_id: int, volume: VolumeInput, path: Path | None = None
+) -> dict:
     with transaction(path) as connection:
+        if not connection.execute(
+            "SELECT 1 FROM editions WHERE id = ?", (edition_id,)
+        ).fetchone():
+            raise ValueError("Edition 不存在")
+        volume_id = _insert_volume(connection, edition_id, volume)
+    record = get_volume(volume_id, path)
+    assert record is not None
+    return record
+
+
+def update_volume_details(
+    volume_id: int, volume: VolumeInput, path: Path | None = None
+) -> dict | None:
+    with transaction(path) as connection:
+        if not connection.execute(
+            "SELECT 1 FROM volumes WHERE id = ?", (volume_id,)
+        ).fetchone():
+            return None
+        _update_volume_row(
+            connection, volume_id, volume.model_copy(update={"id": volume_id})
+        )
+    return get_volume(volume_id, path)
+
+
+def get_edition(edition_id: int, path: Path | None = None) -> dict | None:
+    connection = connect(path)
+    try:
         current = connection.execute(
-            "SELECT edition_id FROM copies WHERE id = ?", (copy_id,)
+            """SELECT ew.work_id FROM edition_works ew
+               WHERE ew.edition_id = ? ORDER BY ew.position LIMIT 1""",
+            (edition_id,),
         ).fetchone()
         if not current:
             return None
-        _apply_copy_identifier_transition(
-            connection, current["edition_id"], copy, existing_copy_id=copy_id
-        )
+        work_rows = connection.execute(
+            """SELECT w.id, w.title, w.subtitle, w.authors, w.scripts
+               FROM works w JOIN edition_works ew ON ew.work_id = w.id
+               WHERE ew.edition_id = ? ORDER BY ew.position""",
+            (edition_id,),
+        ).fetchall()
+    finally:
+        connection.close()
+    detail = get_work(int(current["work_id"]), path)
+    if detail is None:
+        return None
+    group = next(
+        (item for item in detail["editions"] if item["id"] == edition_id), None
+    )
+    if group is None:
+        return None
+    return {
+        **group,
+        "works": [
+            {
+                "id": row["id"], "title": row["title"],
+                "subtitle": row["subtitle"], "authors": row["authors"],
+                "scripts": row["scripts"],
+            }
+            for row in work_rows
+        ],
+    }
+
+
+def get_volume_detail(volume_id: int, path: Path | None = None) -> dict | None:
+    volume = get_volume(volume_id, path)
+    if volume is None:
+        return None
+    connection = connect(path)
+    try:
+        copies = [
+            {
+                "id": row["id"],
+                "volume_id": volume_id,
+                "edition_id": volume["edition_id"],
+                "acquisition_date": row["acquisition_date"],
+                "location": row["location"],
+                "reading_record": row["reading_record"],
+                "effective_metadata": volume["effective_metadata"],
+            }
+            for row in connection.execute(
+                """SELECT id, acquisition_date, location, reading_record
+                   FROM copies WHERE volume_id = ? ORDER BY id""",
+                (volume_id,),
+            ).fetchall()
+        ]
+    finally:
+        connection.close()
+    return {"id": volume_id, "volume": volume, "copies": copies}
+
+
+def get_copy_details(copy_id: int, path: Path | None = None) -> dict | None:
+    record = get_book(copy_id, path)
+    if record is None:
+        return None
+    return {
+        "id": record["id"],
+        "volume_id": record["volume_id"],
+        "edition_id": record["edition_id"],
+        "acquisition_date": record["copy"]["acquisition_date"],
+        "location": record["copy"]["location"],
+        "reading_record": record["copy"]["reading_record"],
+        "effective_metadata": record["volume"]["effective_metadata"],
+    }
+
+
+def create_copy_for_volume(
+    volume_id: int, copy: CopyInput, path: Path | None = None
+) -> dict:
+    with transaction(path) as connection:
+        if not connection.execute(
+            "SELECT 1 FROM volumes WHERE id = ?", (volume_id,)
+        ).fetchone():
+            raise ValueError("Volume 不存在")
+        copy_id = _insert_copy(connection, volume_id, copy)
+    record = get_copy_details(copy_id, path)
+    assert record is not None
+    return record
+
+
+def update_copy_details(
+    copy_id: int, copy: CopyUpdateInput, path: Path | None = None
+) -> dict | None:
+    with transaction(path) as connection:
+        current = connection.execute(
+            "SELECT volume_id FROM copies WHERE id = ?", (copy_id,)
+        ).fetchone()
+        if not current:
+            return None
+        volume_id = copy.volume_id or current["volume_id"]
+        if not connection.execute(
+            "SELECT 1 FROM volumes WHERE id = ?", (volume_id,)
+        ).fetchone():
+            raise ValueError("指定的 Volume 不存在")
         connection.execute(
-            """UPDATE copies SET volume_number = ?, volume_title = ?, identifier = ?,
-               acquisition_date = ?, location = ?, reading_record = ? WHERE id = ?""",
+            """UPDATE copies SET volume_id = ?, acquisition_date = ?,
+               location = ?, reading_record = ? WHERE id = ?""",
             (
-                copy.volume_number, copy.volume_title, copy.identifier,
+                volume_id,
                 copy.acquisition_date.isoformat() if copy.acquisition_date else None,
                 copy.location, copy.reading_record, copy_id,
             ),
         )
-    return get_book(copy_id, path)
+    return get_copy_details(copy_id, path)
 
+
+def move_edition_identifier_to_volume(
+    edition_id: int, volume_id: int, path: Path | None = None
+) -> dict | None:
+    with transaction(path) as connection:
+        edition = connection.execute(
+            "SELECT identifier FROM editions WHERE id = ?", (edition_id,)
+        ).fetchone()
+        if not edition:
+            return None
+        volume = connection.execute(
+            "SELECT identifier FROM volumes WHERE id = ? AND edition_id = ?",
+            (volume_id, edition_id),
+        ).fetchone()
+        if not volume:
+            raise ValueError("指定的 Volume 不屬於此 Edition")
+        edition_identifier = str(edition["identifier"] or "").strip()
+        volume_identifier = str(volume["identifier"] or "").strip()
+        if not edition_identifier:
+            raise ValueError("Edition 沒有可下沉的識別號")
+        if volume_identifier and (
+            volume_identifier.casefold() != edition_identifier.casefold()
+        ):
+            raise ValueError("Volume 已有不同識別號，請先明確解決衝突")
+        connection.execute(
+            "UPDATE volumes SET identifier = ? WHERE id = ?",
+            (edition_identifier, volume_id),
+        )
+        connection.execute(
+            "UPDATE editions SET identifier = '' WHERE id = ?", (edition_id,)
+        )
+    return get_edition(edition_id, path)
 
 def delete_work(work_id: int, path: Path | None = None) -> bool:
     with transaction(path) as connection:
-        primary_editions = connection.execute(
-            "SELECT id FROM editions WHERE work_id = ?", (work_id,)
-        ).fetchall()
-        for edition in primary_editions:
-            replacement = connection.execute(
-                """SELECT work_id FROM edition_works
-                   WHERE edition_id = ? AND work_id <> ? ORDER BY position LIMIT 1""",
-                (edition["id"], work_id),
-            ).fetchone()
-            if replacement:
+        if not connection.execute(
+            "SELECT 1 FROM works WHERE id = ?", (work_id,)
+        ).fetchone():
+            return False
+        edition_ids = [
+            int(row["edition_id"])
+            for row in connection.execute(
+                "SELECT edition_id FROM edition_works WHERE work_id = ?",
+                (work_id,),
+            ).fetchall()
+        ]
+        for edition_id in edition_ids:
+            link_count = int(connection.execute(
+                "SELECT COUNT(*) FROM edition_works WHERE edition_id = ?",
+                (edition_id,),
+            ).fetchone()[0])
+            if link_count == 1:
+                connection.execute("DELETE FROM editions WHERE id = ?", (edition_id,))
+            else:
                 connection.execute(
-                    "UPDATE editions SET work_id = ? WHERE id = ?",
-                    (replacement["work_id"], edition["id"]),
+                    "DELETE FROM edition_works WHERE edition_id = ? AND work_id = ?",
+                    (edition_id, work_id),
                 )
-        cursor = connection.execute("DELETE FROM works WHERE id = ?", (work_id,))
-        return cursor.rowcount > 0
+        connection.execute("DELETE FROM works WHERE id = ?", (work_id,))
+        return True
 
 
 def delete_edition(edition_id: int, path: Path | None = None) -> dict | None:
     with transaction(path) as connection:
-        current = connection.execute(
-            "SELECT work_id FROM editions WHERE id = ?", (edition_id,)
-        ).fetchone()
-        if not current:
+        if not connection.execute(
+            "SELECT 1 FROM editions WHERE id = ?", (edition_id,)
+        ).fetchone():
             return None
         work_ids = _edition_work_ids(connection, edition_id)
+        primary_work_id = work_ids[0] if work_ids else None
         connection.execute("DELETE FROM editions WHERE id = ?", (edition_id,))
         deleted_work_ids = []
         for work_id in work_ids:
@@ -1250,291 +1616,63 @@ def delete_edition(edition_id: int, path: Path | None = None) -> dict | None:
             ).rowcount:
                 deleted_work_ids.append(work_id)
         return {
-            "work_id": current["work_id"],
-            "work_deleted": current["work_id"] in deleted_work_ids,
+            "work_id": primary_work_id,
+            "work_deleted": primary_work_id in deleted_work_ids,
             "deleted_work_ids": deleted_work_ids,
         }
 
+
+
+def delete_volume(volume_id: int, path: Path | None = None) -> dict | None:
+    with transaction(path) as connection:
+        current = connection.execute(
+            "SELECT edition_id FROM volumes WHERE id = ?", (volume_id,)
+        ).fetchone()
+        if not current:
+            return None
+        relation = connection.execute(
+            "SELECT 1 FROM edition_works WHERE volume_id = ? LIMIT 1",
+            (volume_id,),
+        ).fetchone()
+        if relation:
+            raise ValueError(
+                "此冊仍由 Edition–Work 分冊關聯引用，請先調整進階結構"
+            )
+        copy_count = connection.execute(
+            "SELECT COUNT(*) FROM copies WHERE volume_id = ?", (volume_id,)
+        ).fetchone()[0]
+        connection.execute("DELETE FROM volumes WHERE id = ?", (volume_id,))
+        return {
+            "edition_id": current["edition_id"],
+            "deleted_copy_count": copy_count,
+            "edition_retained": True,
+        }
 
 def delete_copy(copy_id: int, path: Path | None = None) -> dict | None:
     with transaction(path) as connection:
         current = connection.execute(
-            """SELECT c.edition_id, e.work_id FROM copies c
-               JOIN editions e ON e.id = c.edition_id WHERE c.id = ?""",
+            """SELECT c.volume_id, v.edition_id,
+                      (SELECT ew.work_id FROM edition_works ew
+                       WHERE ew.edition_id = v.edition_id
+                       ORDER BY ew.position LIMIT 1) AS work_id
+               FROM copies c
+               JOIN volumes v ON v.id = c.volume_id
+               WHERE c.id = ?""",
             (copy_id,),
         ).fetchone()
         if not current:
             return None
-        edition_id = current["edition_id"]
-        work_id = current["work_id"]
-        work_ids = _edition_work_ids(connection, edition_id)
         connection.execute("DELETE FROM copies WHERE id = ?", (copy_id,))
-        edition_deleted = connection.execute(
-            """DELETE FROM editions WHERE id = ?
-               AND NOT EXISTS (SELECT 1 FROM copies WHERE edition_id = ?)""",
-            (edition_id, edition_id),
-        ).rowcount > 0
-        deleted_work_ids = []
-        if edition_deleted:
-            for related_work_id in work_ids:
-                if connection.execute(
-                    """DELETE FROM works WHERE id = ?
-                       AND NOT EXISTS (SELECT 1 FROM edition_works WHERE work_id = ?)""",
-                    (related_work_id, related_work_id),
-                ).rowcount:
-                    deleted_work_ids.append(related_work_id)
+        remaining = connection.execute(
+            "SELECT COUNT(*) FROM copies WHERE volume_id = ?", (current["volume_id"],)
+        ).fetchone()[0]
         return {
-            "work_id": work_id,
-            "edition_id": edition_id,
-            "edition_deleted": edition_deleted,
-            "work_deleted": work_id in deleted_work_ids,
-            "deleted_work_ids": deleted_work_ids,
+            "work_id": current["work_id"],
+            "edition_id": current["edition_id"],
+            "volume_id": current["volume_id"],
+            "volume_retained": True,
+            "volume_copy_count": remaining,
+            "edition_deleted": False,
+            "work_deleted": False,
+            "deleted_work_ids": [],
         }
-
-
-def list_tags(path: Path | None = None) -> list[dict]:
-    connection = connect(path)
-    try:
-        return list_tags_from_connection(connection)
-    finally:
-        connection.close()
-
-
-def _tags_for_work(connection: Connection, work_id: int) -> list[dict]:
-    assigned = {
-        row["tag_id"] for row in connection.execute(
-            "SELECT tag_id FROM work_tags WHERE work_id = ?", (work_id,)
-        ).fetchall()
-    }
-    return [tag for tag in list_tags_from_connection(connection) if tag["id"] in assigned]
-
-
-def list_tags_from_connection(connection: Connection) -> list[dict]:
-    rows = connection.execute("SELECT id, name, parent_id FROM tags ORDER BY id").fetchall()
-    by_id = {row["id"]: row for row in rows}
-
-    def path_for(row: Row) -> str:
-        names = [row["name"]]
-        parent_id = row["parent_id"]
-        visited = {row["id"]}
-        while parent_id is not None and parent_id in by_id and parent_id not in visited:
-            visited.add(parent_id)
-            parent = by_id[parent_id]
-            names.append(parent["name"])
-            parent_id = parent["parent_id"]
-        return " → ".join(reversed(names))
-
-    return sorted(
-        [{
-            "id": row["id"], "name": row["name"], "parent_id": row["parent_id"],
-            "path": path_for(row),
-            "has_children": connection.execute(
-                "SELECT 1 FROM tags WHERE parent_id = ? LIMIT 1", (row["id"],)
-            ).fetchone() is not None,
-            "assigned_work_count": connection.execute(
-                "SELECT COUNT(*) FROM work_tags WHERE tag_id = ?", (row["id"],)
-            ).fetchone()[0],
-        } for row in rows],
-        key=lambda item: (item["path"].casefold(), item["id"]),
-    )
-
-
-def create_tag(tag: TagInput, path: Path | None = None) -> dict:
-    with transaction(path) as connection:
-        if tag.parent_id is not None:
-            parent = connection.execute("SELECT id FROM tags WHERE id = ?", (tag.parent_id,)).fetchone()
-            if not parent:
-                raise ValueError("上級標籤不存在")
-            if connection.execute(
-                "SELECT 1 FROM work_tags WHERE tag_id = ? LIMIT 1", (tag.parent_id,)
-            ).fetchone():
-                raise ValueError("此標籤已有藏書，請先重新分類後再建立下級標籤。")
-        existing = connection.execute(
-            "SELECT id FROM tags WHERE name = ? COLLATE NOCASE AND parent_id IS ?",
-            (tag.name, tag.parent_id),
-        ).fetchone()
-        if existing:
-            raise ValueError("同一上級下已有同名標籤")
-        cursor = connection.execute(
-            "INSERT INTO tags (name, parent_id) VALUES (?, ?)",
-            (tag.name, tag.parent_id),
-        )
-        tag_id = int(cursor.lastrowid)
-        return next(record for record in list_tags_from_connection(connection) if record["id"] == tag_id)
-
-
-def update_tag(tag_id: int, tag: TagInput, path: Path | None = None) -> dict | None:
-    with transaction(path) as connection:
-        exists = connection.execute("SELECT id FROM tags WHERE id = ?", (tag_id,)).fetchone()
-        if not exists:
-            return None
-        if tag.parent_id == tag_id:
-            raise ValueError("標籤不能以自己作為上級")
-        if tag.parent_id is not None and connection.execute(
-            "SELECT 1 FROM work_tags WHERE tag_id = ? LIMIT 1", (tag.parent_id,)
-        ).fetchone():
-            raise ValueError("此標籤已有藏書，請先重新分類後再建立下級標籤。")
-        parent_id = tag.parent_id
-        visited = {tag_id}
-        while parent_id is not None:
-            if parent_id in visited:
-                raise ValueError("標籤層級不能形成循環")
-            visited.add(parent_id)
-            parent = connection.execute(
-                "SELECT parent_id FROM tags WHERE id = ?", (parent_id,)
-            ).fetchone()
-            if not parent:
-                raise ValueError("上級標籤不存在")
-            parent_id = parent["parent_id"]
-        duplicate = connection.execute(
-            """SELECT id FROM tags WHERE id <> ? AND name = ? COLLATE NOCASE
-               AND parent_id IS ?""",
-            (tag_id, tag.name, tag.parent_id),
-        ).fetchone()
-        if duplicate:
-            raise ValueError("同一上級下已有同名標籤")
-        connection.execute(
-            "UPDATE tags SET name = ?, parent_id = ? WHERE id = ?",
-            (tag.name, tag.parent_id, tag_id),
-        )
-        return next(record for record in list_tags_from_connection(connection) if record["id"] == tag_id)
-
-
-def list_tag_violations(path: Path | None = None) -> list[dict]:
-    connection = connect(path)
-    try:
-        tags = {item["id"]: item for item in list_tags_from_connection(connection)}
-        rows = connection.execute(
-            """SELECT wt.work_id, w.title, wt.tag_id FROM work_tags wt
-               JOIN works w ON w.id = wt.work_id
-               WHERE EXISTS (SELECT 1 FROM tags child WHERE child.parent_id = wt.tag_id)
-               ORDER BY w.title COLLATE NOCASE, wt.work_id"""
-        ).fetchall()
-        return [{
-            "work_id": row["work_id"], "work_title": row["title"],
-            "tag_id": row["tag_id"], "tag_path": tags[row["tag_id"]]["path"],
-        } for row in rows]
-    finally:
-        connection.close()
-
-
-def delete_tag(tag_id: int, path: Path | None = None) -> dict | None:
-    with transaction(path) as connection:
-        exists = connection.execute(
-            "SELECT id FROM tags WHERE id = ?", (tag_id,)
-        ).fetchone()
-        if not exists:
-            return None
-        rows = connection.execute(
-            """WITH RECURSIVE descendants(id, depth) AS (
-                   SELECT id, 0 FROM tags WHERE id = ?
-                   UNION ALL
-                   SELECT t.id, descendants.depth + 1
-                   FROM tags t JOIN descendants ON t.parent_id = descendants.id
-               )
-               SELECT id, depth FROM descendants ORDER BY depth DESC""",
-            (tag_id,),
-        ).fetchall()
-        ids = [row["id"] for row in rows]
-        connection.executemany(
-            "DELETE FROM tags WHERE id = ?", [(current_id,) for current_id in ids]
-        )
-        return {"deleted_count": len(ids)}
-
-
-def list_publishers(path: Path | None = None) -> list[dict]:
-    connection = connect(path)
-    try:
-        publishers = connection.execute(
-            "SELECT id, canonical_name FROM publishers ORDER BY canonical_name COLLATE NOCASE"
-        ).fetchall()
-        return [
-            {
-                "id": publisher["id"],
-                "canonical_name": publisher["canonical_name"],
-                "aliases": [row[0] for row in connection.execute(
-                    "SELECT alias FROM publisher_aliases WHERE publisher_id = ? ORDER BY alias COLLATE NOCASE",
-                    (publisher["id"],),
-                ).fetchall()],
-            }
-            for publisher in publishers
-        ]
-    finally:
-        connection.close()
-
-
-def list_publisher_names(path: Path | None = None) -> list[str]:
-    connection = connect(path)
-    try:
-        return [
-            row["name"] for row in connection.execute(
-                """SELECT DISTINCT TRIM(publisher) AS name
-                   FROM editions WHERE TRIM(publisher) <> ''
-                   ORDER BY name COLLATE NOCASE"""
-            ).fetchall()
-        ]
-    finally:
-        connection.close()
-
-
-def normalize_publisher(
-    payload: PublisherNormalizationInput, path: Path | None = None
-) -> dict:
-    canonical_name = payload.canonical_name.strip()
-    aliases = list(dict.fromkeys(
-        value.strip() for value in [canonical_name, *payload.aliases] if value.strip()
-    ))
-    with transaction(path) as connection:
-        target = connection.execute(
-            "SELECT id FROM publishers WHERE canonical_name = ? COLLATE NOCASE",
-            (canonical_name,),
-        ).fetchone()
-        if target:
-            target_id = target["id"]
-        else:
-            cursor = connection.execute(
-                "INSERT INTO publishers (canonical_name) VALUES (?)", (canonical_name,)
-            )
-            target_id = int(cursor.lastrowid)
-
-        for alias_name in aliases:
-            existing = connection.execute(
-                "SELECT publisher_id FROM publisher_aliases WHERE alias = ? COLLATE NOCASE",
-                (alias_name,),
-            ).fetchone()
-            if existing and existing["publisher_id"] != target_id:
-                source_id = existing["publisher_id"]
-                source_aliases = connection.execute(
-                    "SELECT alias FROM publisher_aliases WHERE publisher_id = ?", (source_id,)
-                ).fetchall()
-                connection.execute(
-                    "UPDATE editions SET publisher_id = ? WHERE publisher_id = ?",
-                    (target_id, source_id),
-                )
-                connection.execute(
-                    "DELETE FROM publisher_aliases WHERE publisher_id = ?", (source_id,)
-                )
-                for source_alias in source_aliases:
-                    connection.execute(
-                        "INSERT OR IGNORE INTO publisher_aliases (publisher_id, alias) VALUES (?, ?)",
-                        (target_id, source_alias["alias"]),
-                    )
-                connection.execute("DELETE FROM publishers WHERE id = ?", (source_id,))
-            connection.execute(
-                "INSERT OR IGNORE INTO publisher_aliases (publisher_id, alias) VALUES (?, ?)",
-                (target_id, alias_name),
-            )
-            connection.execute(
-                """UPDATE editions SET publisher_id = ?
-                   WHERE publisher_id IS NULL AND publisher = ? COLLATE NOCASE""",
-                (target_id, alias_name),
-            )
-    return next(item for item in list_publishers(path) if item["id"] == target_id)
-
-
-def delete_publisher(publisher_id: int, path: Path | None = None) -> bool:
-    with transaction(path) as connection:
-        cursor = connection.execute(
-            "DELETE FROM publishers WHERE id = ?", (publisher_id,)
-        )
-        return cursor.rowcount > 0

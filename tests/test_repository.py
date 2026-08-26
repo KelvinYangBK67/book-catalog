@@ -8,15 +8,17 @@ from pathlib import Path
 
 from app.database import connect, initialize
 from app.repository import (
-    CopyIdentifierTransitionRequired,
-    create_book, create_books_batch, create_tag, create_work_record, delete_copy, delete_edition, delete_publisher,
+    create_book, create_books_batch, create_copy_for_volume, create_tag,
+    create_volume_record, create_work_record, delete_copy, delete_edition, delete_publisher, delete_volume,
     delete_tag, delete_work, get_book, get_work, list_books, list_editions, list_publishers,
-    list_tag_violations, list_tags, list_works, normalize_publisher, update_book, update_copy_details,
-    update_edition_details, update_tag, update_work_details,
+    list_tag_violations, list_tags, list_works, move_edition_identifier_to_volume,
+    normalize_publisher, update_book,
+    update_copy_details, update_edition_details, update_tag, update_volume_details,
+    update_work_details,
 )
 from app.schemas import (
-    BookBatchInput, BookInput, CopyInput, EditionInput,
-    PublisherNormalizationInput, TagInput, WorkInput,
+    BookBatchInput, BookInput, CopyInput, CopyUpdateInput, EditionInput,
+    PublisherNormalizationInput, TagInput, VolumeInput, WorkInput,
 )
 
 
@@ -31,175 +33,250 @@ def sample_book(title: str = "百年孤寂") -> BookInput:
             edition_scripts="中文", publisher="皇冠",
             publication_year=2018,
         ),
-        copy=CopyInput(volume="1.2.3", acquisition_date=date(2024, 1, 3), location="書房 A 架", reading_record="已讀"),
+        volume=VolumeInput(volume_number="1.2.3"),
+        copy=CopyInput(acquisition_date=date(2024, 1, 3), location="書房 A 架", reading_record="已讀"),
     )
 
 
 class DatabaseMigrationTests(unittest.TestCase):
-    def test_legacy_work_columns_are_removed(self) -> None:
+    def create_legacy_database(self, path: Path) -> sqlite3.Connection:
+        connection = sqlite3.connect(path)
+        connection.executescript(
+            """
+            PRAGMA foreign_keys = ON;
+            CREATE TABLE works (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                title TEXT NOT NULL,
+                subtitle TEXT NOT NULL DEFAULT '',
+                authors TEXT NOT NULL DEFAULT '',
+                scripts TEXT NOT NULL DEFAULT ''
+            );
+            CREATE TABLE editions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                work_id INTEGER NOT NULL REFERENCES works(id) ON DELETE CASCADE,
+                title TEXT NOT NULL DEFAULT '',
+                subtitle TEXT NOT NULL DEFAULT '',
+                identifier TEXT NOT NULL DEFAULT '',
+                translator TEXT NOT NULL DEFAULT '',
+                other_title TEXT NOT NULL DEFAULT '',
+                other_subtitle TEXT NOT NULL DEFAULT '',
+                translated_title TEXT NOT NULL DEFAULT '',
+                translated_subtitle TEXT NOT NULL DEFAULT '',
+                edition_scripts TEXT NOT NULL DEFAULT '',
+                version TEXT NOT NULL DEFAULT '',
+                series TEXT NOT NULL DEFAULT '',
+                publisher TEXT NOT NULL DEFAULT '',
+                publisher_id INTEGER,
+                publication_year INTEGER,
+                publication_year_end INTEGER,
+                force_separate INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE TABLE edition_works (
+                edition_id INTEGER NOT NULL REFERENCES editions(id) ON DELETE CASCADE,
+                work_id INTEGER NOT NULL REFERENCES works(id) ON DELETE CASCADE,
+                position INTEGER NOT NULL DEFAULT 0,
+                relation_type TEXT NOT NULL DEFAULT 'contained',
+                volume_number TEXT NOT NULL DEFAULT '',
+                PRIMARY KEY (edition_id, work_id),
+                UNIQUE (edition_id, position)
+            );
+            CREATE TABLE copies (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                edition_id INTEGER NOT NULL REFERENCES editions(id) ON DELETE CASCADE,
+                volume_number TEXT NOT NULL DEFAULT '',
+                volume_title TEXT NOT NULL DEFAULT '',
+                identifier TEXT NOT NULL DEFAULT '',
+                acquisition_date TEXT,
+                location TEXT NOT NULL DEFAULT '',
+                reading_record TEXT NOT NULL DEFAULT ''
+            );
+            """
+        )
+        return connection
+
+    def add_legacy_edition(self, connection: sqlite3.Connection) -> tuple[int, int]:
+        connection.execute(
+            "INSERT INTO works (title, authors) VALUES ('Legacy Work', 'Author')"
+        )
+        work_id = int(connection.execute("SELECT last_insert_rowid()").fetchone()[0])
+        connection.execute(
+            "INSERT INTO editions (work_id, identifier) VALUES (?, 'ISBN SET')",
+            (work_id,),
+        )
+        edition_id = int(connection.execute("SELECT last_insert_rowid()").fetchone()[0])
+        connection.execute(
+            """INSERT INTO edition_works
+                   (edition_id, work_id, position, relation_type, volume_number)
+               VALUES (?, ?, 0, 'contained', '')""",
+            (edition_id, work_id),
+        )
+        return work_id, edition_id
+
+    def test_legacy_copy_becomes_implicit_volume_plus_copy(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "legacy.db"
-            connection = sqlite3.connect(path)
+            connection = self.create_legacy_database(path)
+            _, edition_id = self.add_legacy_edition(connection)
             connection.execute(
-                """CREATE TABLE works (
-                    id INTEGER PRIMARY KEY, title TEXT NOT NULL,
-                    subtitle TEXT NOT NULL DEFAULT '', authors TEXT NOT NULL DEFAULT '',
-                    language TEXT NOT NULL DEFAULT ''
-                )"""
+                """INSERT INTO copies
+                       (edition_id, acquisition_date, location, reading_record)
+                   VALUES (?, '2024-01-01', 'Shelf', 'Read')""",
+                (edition_id,),
+            )
+            connection.commit()
+            connection.close()
+
+            report = initialize(path)
+            connection = connect(path)
+            try:
+                copy_columns = {
+                    row["name"] for row in connection.execute("PRAGMA table_info(copies)")
+                }
+                volume = connection.execute("SELECT * FROM volumes").fetchone()
+                copy = connection.execute("SELECT * FROM copies").fetchone()
+            finally:
+                connection.close()
+
+            self.assertEqual(report["migrated_copies"], 1)
+            self.assertEqual(
+                copy_columns,
+                {"id", "volume_id", "acquisition_date", "location", "reading_record"},
+            )
+            self.assertEqual(volume["edition_id"], edition_id)
+            self.assertEqual((volume["volume_number"], volume["volume_title"]), ("", ""))
+            self.assertEqual(copy["volume_id"], volume["id"])
+            self.assertEqual(copy["location"], "Shelf")
+
+    def test_legacy_same_volume_copies_share_one_volume(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "shared.db"
+            connection = self.create_legacy_database(path)
+            _, edition_id = self.add_legacy_edition(connection)
+            connection.executemany(
+                """INSERT INTO copies
+                       (edition_id, volume_number, volume_title, identifier, location)
+                   VALUES (?, '2', 'Second', 'ISBN V2', ?)""",
+                [(edition_id, "Shelf A"), (edition_id, "Shelf B")],
+            )
+            connection.commit()
+            connection.close()
+
+            report = initialize(path)
+            connection = connect(path)
+            try:
+                volumes = connection.execute("SELECT * FROM volumes").fetchall()
+                copies = connection.execute(
+                    "SELECT volume_id, location FROM copies ORDER BY id"
+                ).fetchall()
+            finally:
+                connection.close()
+
+            self.assertEqual(report["shared_volume_groups"], 1)
+            self.assertEqual(len(volumes), 1)
+            self.assertEqual(volumes[0]["identifier"], "ISBN V2")
+            self.assertEqual({copy["volume_id"] for copy in copies}, {volumes[0]["id"]})
+            self.assertEqual([copy["location"] for copy in copies], ["Shelf A", "Shelf B"])
+
+    def test_legacy_identifier_conflict_is_preserved_and_reported(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "identifier-conflict.db"
+            connection = self.create_legacy_database(path)
+            _, edition_id = self.add_legacy_edition(connection)
+            connection.executemany(
+                """INSERT INTO copies
+                       (edition_id, volume_number, identifier)
+                   VALUES (?, '1', ?)""",
+                [(edition_id, "ISBN A"), (edition_id, "ISBN B")],
+            )
+            connection.commit()
+            connection.close()
+
+            report = initialize(path)
+            connection = connect(path)
+            try:
+                identifier = connection.execute(
+                    "SELECT identifier FROM volumes"
+                ).fetchone()[0]
+            finally:
+                connection.close()
+
+            self.assertEqual(identifier, "ISBN A; ISBN B")
+            self.assertEqual(len(report["identifier_conflicts"]), 1)
+
+    def test_volume_relation_is_migrated_to_volume_id_foreign_key(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "relation.db"
+            connection = self.create_legacy_database(path)
+            work_id, edition_id = self.add_legacy_edition(connection)
+            connection.execute(
+                """UPDATE edition_works SET relation_type = 'volume',
+                   volume_number = 'VII'
+                   WHERE edition_id = ? AND work_id = ?""",
+                (edition_id, work_id),
+            )
+            connection.execute(
+                """INSERT INTO copies (edition_id, volume_number, location)
+                   VALUES (?, 'VII', 'Shelf')""",
+                (edition_id,),
             )
             connection.commit()
             connection.close()
 
             initialize(path)
-
             connection = connect(path)
             try:
-                columns = [row["name"] for row in connection.execute("PRAGMA table_info(works)")]
-            finally:
-                connection.close()
-            self.assertEqual(columns, ["id", "title", "subtitle", "authors", "scripts"])
-
-    def test_legacy_names_are_migrated_to_new_fields(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "legacy-names.db"
-            initialize(path)
-            connection = connect(path)
-            try:
-                connection.execute("ALTER TABLE works ADD COLUMN language TEXT NOT NULL DEFAULT ''")
-                connection.execute("ALTER TABLE editions ADD COLUMN isbn TEXT NOT NULL DEFAULT ''")
-                connection.execute("CREATE INDEX idx_editions_isbn ON editions(isbn)")
-                connection.execute(
-                    "ALTER TABLE editions ADD COLUMN translation_language TEXT NOT NULL DEFAULT ''"
-                )
-                connection.execute(
-                    "INSERT INTO works (title, authors, language) VALUES ('舊書', '作者', '藏文')"
-                )
-                work_id = connection.execute("SELECT last_insert_rowid()").fetchone()[0]
-                connection.execute(
-                    """INSERT INTO editions (work_id, isbn, translation_language, publisher)
-                       VALUES (?, '舊識別號', '漢文', '舊出版社')""",
-                    (work_id,),
-                )
-                edition_id = connection.execute("SELECT last_insert_rowid()").fetchone()[0]
-                connection.execute("INSERT INTO copies (edition_id) VALUES (?)", (edition_id,))
-                connection.commit()
+                relation_columns = {
+                    row["name"]
+                    for row in connection.execute("PRAGMA table_info(edition_works)")
+                }
+                relation = connection.execute(
+                    "SELECT relation_type, volume_id FROM edition_works"
+                ).fetchone()
+                volume = connection.execute(
+                    "SELECT id, volume_number FROM volumes"
+                ).fetchone()
+                foreign_keys = connection.execute(
+                    "PRAGMA foreign_key_list(edition_works)"
+                ).fetchall()
             finally:
                 connection.close()
 
-            initialize(path)
-            migrated = get_book(1, path)
-            assert migrated is not None
-            normalize_publisher(PublisherNormalizationInput(
-                canonical_name=migrated["edition"]["publisher"],
-                aliases=[migrated["edition"]["publisher"]],
-            ), path)
-            migrated = get_book(1, path)
-            assert migrated is not None
-            self.assertEqual(migrated["work"]["scripts"], "藏文")
-            self.assertEqual(migrated["edition"]["identifier"], "舊識別號")
-            self.assertEqual(migrated["edition"]["edition_scripts"], "漢文")
-            self.assertEqual(migrated["edition"]["publisher_canonical"], "舊出版社")
-            connection = connect(path)
-            try:
-                work_columns = {row["name"] for row in connection.execute("PRAGMA table_info(works)")}
-                edition_columns = {row["name"] for row in connection.execute("PRAGMA table_info(editions)")}
-            finally:
-                connection.close()
-            self.assertNotIn("language", work_columns)
-            self.assertNotIn("isbn", edition_columns)
-            self.assertNotIn("translation_language", edition_columns)
+            self.assertNotIn("volume_number", relation_columns)
+            self.assertEqual(relation["relation_type"], "volume")
+            self.assertEqual(relation["volume_id"], volume["id"])
+            self.assertEqual(volume["volume_number"], "VII")
+            self.assertTrue(any(
+                row["from"] == "volume_id" and row["table"] == "volumes"
+                for row in foreign_keys
+            ))
 
-    def test_duplicate_hierarchy_is_merged_without_losing_copies(self) -> None:
+    def test_initialize_does_not_semantically_merge_duplicate_records(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "duplicates.db"
-            initialize(path)
-            connection = connect(path)
-            try:
-                connection.execute("INSERT INTO works (title, authors) VALUES ('Same', 'Author')")
-                work_one = connection.execute("SELECT last_insert_rowid()").fetchone()[0]
-                connection.execute("INSERT INTO works (title, authors) VALUES ('Same', 'Author')")
-                work_two = connection.execute("SELECT last_insert_rowid()").fetchone()[0]
-                for work_id, location in ((work_one, "A"), (work_two, "B")):
-                    connection.execute("INSERT INTO editions (work_id, identifier) VALUES (?, 'ISBN')", (work_id,))
-                    edition_id = connection.execute("SELECT last_insert_rowid()").fetchone()[0]
-                    connection.execute(
-                        "INSERT INTO copies (edition_id, volume_number, location) VALUES (?, '1', ?)",
-                        (edition_id, location),
-                    )
-                connection.commit()
-            finally:
-                connection.close()
-
-            initialize(path)
-
-            connection = connect(path)
-            try:
-                counts = [connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
-                          for table in ("works", "editions", "copies")]
-                locations = [row[0] for row in connection.execute("SELECT location FROM copies ORDER BY id")]
-            finally:
-                connection.close()
-            self.assertEqual(counts, [1, 1, 2])
-            self.assertEqual(locations, ["A", "B"])
-
-    def test_edition_volume_is_moved_to_copy(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "volume.db"
-            initialize(path)
-            connection = connect(path)
-            try:
-                connection.execute("ALTER TABLE editions ADD COLUMN volume TEXT NOT NULL DEFAULT ''")
-                connection.execute("INSERT INTO works (title, authors) VALUES ('Work', 'Author')")
-                work_id = connection.execute("SELECT last_insert_rowid()").fetchone()[0]
+            connection = self.create_legacy_database(path)
+            for location in ("A", "B"):
+                _, edition_id = self.add_legacy_edition(connection)
                 connection.execute(
-                    "INSERT INTO editions (work_id, version, volume) VALUES (?, 'First', '2')",
-                    (work_id,),
+                    "INSERT INTO copies (edition_id, location) VALUES (?, ?)",
+                    (edition_id, location),
                 )
-                edition_id = connection.execute("SELECT last_insert_rowid()").fetchone()[0]
-                connection.execute("INSERT INTO copies (edition_id) VALUES (?)", (edition_id,))
-                connection.commit()
-            finally:
-                connection.close()
-
-            initialize(path)
-
-            connection = connect(path)
-            try:
-                edition_columns = [row["name"] for row in connection.execute("PRAGMA table_info(editions)")]
-                volume = connection.execute("SELECT volume_number FROM copies").fetchone()[0]
-            finally:
-                connection.close()
-            self.assertNotIn("volume", edition_columns)
-            self.assertEqual(volume, "2")
-
-
-    def test_legacy_copy_volume_is_migrated_to_volume_number(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "legacy-copy-volume.db"
-            initialize(path)
-            connection = connect(path)
-            try:
-                connection.execute(
-                    "ALTER TABLE copies ADD COLUMN volume TEXT NOT NULL DEFAULT ''"
-                )
-                connection.execute("INSERT INTO works (title) VALUES ('Legacy Work')")
-                connection.execute("INSERT INTO editions (work_id) VALUES (1)")
-                connection.execute(
-                    "INSERT INTO copies (edition_id, volume) VALUES (1, '2.1')"
-                )
-                connection.commit()
-            finally:
-                connection.close()
+            connection.commit()
+            connection.close()
 
             initialize(path)
             connection = connect(path)
             try:
-                row = connection.execute(
-                    "SELECT volume_number, volume_title FROM copies WHERE id = 1"
-                ).fetchone()
+                counts = {
+                    table: connection.execute(
+                        f"SELECT COUNT(*) FROM {table}"
+                    ).fetchone()[0]
+                    for table in ("works", "editions", "volumes", "copies")
+                }
             finally:
                 connection.close()
-            self.assertEqual((row["volume_number"], row["volume_title"]), ("2.1", ""))
+            self.assertEqual(counts, {
+                "works": 2, "editions": 2, "volumes": 2, "copies": 2,
+            })
 
 
 class RepositoryTests(unittest.TestCase):
@@ -211,19 +288,128 @@ class RepositoryTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.temp.cleanup()
 
-    def test_create_persists_three_linked_layers(self) -> None:
+    def test_single_volume_book_uses_an_implicit_volume(self) -> None:
+        book = sample_book("Implicit Volume")
+        book.volume = VolumeInput()
+        created = create_book(book, self.path)
+
+        self.assertEqual(created["volume"]["volume_number"], "")
+        self.assertEqual(created["volume"]["volume_title"], "")
+        self.assertEqual(created["copy"]["volume_id"], created["volume"]["id"])
+        connection = connect(self.path)
+        try:
+            volume_count = connection.execute("SELECT COUNT(*) FROM volumes").fetchone()[0]
+            copy_columns = {
+                row["name"] for row in connection.execute("PRAGMA table_info(copies)")
+            }
+        finally:
+            connection.close()
+        self.assertEqual(volume_count, 1)
+        self.assertNotIn("volume_number", copy_columns)
+        self.assertNotIn("volume_title", copy_columns)
+        self.assertNotIn("identifier", copy_columns)
+
+    def test_multiple_volumes_have_independent_overrides(self) -> None:
+        first = sample_book("Volume Overrides")
+        first.volume = VolumeInput(
+            volume_number="1", identifier="ISBN V1", version="1",
+            publication_year=2001, responsibility="Editor One",
+        )
+        second = sample_book("Volume Overrides")
+        second.volume = VolumeInput(
+            volume_number="2", identifier="ISBN V2", version="2",
+            publication_year=2002, responsibility="Editor Two",
+        )
+        first_record = create_book(first, self.path)
+        second_record = create_book(second, self.path)
+
+        self.assertEqual(first_record["edition_id"], second_record["edition_id"])
+        self.assertNotEqual(first_record["volume_id"], second_record["volume_id"])
+        detail = get_work(list_works("Volume Overrides", self.path)[0]["id"], self.path)
+        assert detail is not None
+        volumes = [group["volume"] for group in detail["editions"][0]["volumes"]]
+        self.assertEqual(
+            [
+                (
+                    volume["volume_number"], volume["identifier"], volume["version"],
+                    volume["publication_year"], volume["responsibility"],
+                )
+                for volume in volumes
+            ],
+            [
+                ("1", "ISBN V1", "第1版", 2001, "Editor One"),
+                ("2", "ISBN V2", "第2版", 2002, "Editor Two"),
+            ],
+        )
+
+    def test_one_volume_can_have_two_physical_copies(self) -> None:
+        first = create_book(sample_book("Shared Physical Volume"), self.path)
+        second = create_copy_for_volume(
+            first["volume_id"],
+            CopyInput(location="Second Shelf", reading_record="Unread"),
+            self.path,
+        )
+
+        self.assertEqual(first["volume_id"], second["volume_id"])
+        connection = connect(self.path)
+        try:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT COUNT(*) FROM copies WHERE volume_id = ?",
+                    (first["volume_id"],),
+                ).fetchone()[0],
+                2,
+            )
+        finally:
+            connection.close()
+
+    def test_existing_edition_accepts_new_volume_and_existing_volume_accepts_copy(self) -> None:
+        first = create_book(sample_book("Direct Volume CRUD"), self.path)
+        volume = create_volume_record(
+            first["edition_id"],
+            VolumeInput(
+                position=5, volume_number="Appendix", volume_title="Tables",
+                version="Revised", publication_year="2020–2021",
+                responsibility="Compiler",
+            ),
+            self.path,
+        )
+        updated = update_volume_details(
+            volume["id"],
+            VolumeInput(
+                position=5, volume_number="A", volume_title="Reference Tables",
+                version="3", publication_year=2022, responsibility="New Compiler",
+            ),
+            self.path,
+        )
+        assert updated is not None
+        copy = create_copy_for_volume(
+            volume["id"], CopyInput(location="Archive"), self.path
+        )
+
+        self.assertEqual(copy["volume_id"], volume["id"])
+        self.assertEqual(updated["volume_number"], "A")
+        self.assertEqual(updated["version"], "第3版")
+        self.assertEqual(updated["publication_year"], 2022)
+        self.assertEqual(updated["responsibility"], "New Compiler")
+
+    def test_create_persists_four_linked_layers(self) -> None:
         created = create_book(sample_book(), self.path)
         self.assertEqual(created["id"], 1)
         self.assertEqual(created["edition_id"], 1)
-        self.assertEqual(created["copy"]["volume_number"], "1.2.3")
+        self.assertEqual(created["volume"]["volume_number"], "1.2.3")
 
         connection = connect(self.path)
         try:
-            counts = [connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
-                      for table in ("works", "editions", "copies")]
+            counts = [
+                connection.execute(
+                    f"SELECT COUNT(*) FROM {table}"
+                ).fetchone()[0]
+                for table in ("works", "editions", "volumes", "copies")
+            ]
         finally:
             connection.close()
-        self.assertEqual(counts, [1, 1, 1])
+        self.assertEqual(counts, [1, 1, 1, 1])
 
     def test_create_allows_optional_year_and_date_to_be_empty(self) -> None:
         payload = BookInput.model_validate({
@@ -260,13 +446,13 @@ class RepositoryTests(unittest.TestCase):
         self.assertEqual((works[0]["edition_count"], works[0]["copy_count"]), (1, 2))
         detail = get_work(works[0]["id"], self.path)
         assert detail is not None
-        self.assertEqual(len(detail["editions"][0]["copies"]), 2)
+        self.assertEqual(len(detail["editions"][0]["volumes"][0]["copies"]), 2)
 
     def test_different_volumes_share_the_same_edition(self) -> None:
         first = sample_book()
-        first.copy_.volume_number = "1"
+        first.volume.volume_number = "1"
         second = sample_book()
-        second.copy_.volume_number = "2"
+        second.volume.volume_number = "2"
 
         create_book(first, self.path)
         create_book(second, self.path)
@@ -276,7 +462,7 @@ class RepositoryTests(unittest.TestCase):
         self.assertEqual((works[0]["edition_count"], works[0]["copy_count"]), (1, 2))
         detail = get_work(works[0]["id"], self.path)
         assert detail is not None
-        self.assertEqual([copy["volume_number"] for copy in detail["editions"][0]["copies"]], ["1", "2"])
+        self.assertEqual([group["volume"]["volume_number"] for group in detail["editions"][0]["volumes"]], ["1", "2"])
 
     def test_different_version_creates_another_edition(self) -> None:
         first = sample_book()
@@ -299,14 +485,14 @@ class RepositoryTests(unittest.TestCase):
     def test_identifier_year_and_volume_do_not_split_an_edition(self) -> None:
         first = sample_book()
         first.edition.identifier = "ISBN 111"
-        first.edition.version = "第 2 版"
+        first.edition.version = "\u7b2c 2 \u7248"
         first.edition.publication_year = 2002
-        first.copy_.volume_number = "1"
+        first.volume.volume_number = "1"
         second = sample_book()
         second.edition.identifier = "ISBN 222"
-        second.edition.version = "第 2 版"
+        second.edition.version = "\u7b2c 2 \u7248"
         second.edition.publication_year = 2003
-        second.copy_.volume_number = "2"
+        second.volume.volume_number = "2"
 
         create_book(first, self.path)
         create_book(second, self.path)
@@ -315,90 +501,86 @@ class RepositoryTests(unittest.TestCase):
         assert detail is not None
         self.assertEqual(len(detail["editions"]), 1)
         edition = detail["editions"][0]
-        self.assertEqual(edition["edition"]["identifier"], "ISBN 111; ISBN 222")
-        self.assertEqual(edition["edition"]["publication_year"], "2002–2003")
+        self.assertEqual(edition["edition"]["identifier"], "ISBN 111")
+        self.assertEqual(edition["edition"]["publication_year"], 2002)
+        volumes = [group["volume"] for group in edition["volumes"]]
         self.assertEqual(
-            [copy["volume_number"] for copy in edition["copies"]], ["1", "2"]
+            [volume["volume_number"] for volume in volumes], ["1", "2"]
+        )
+        self.assertEqual(
+            [volume["effective_metadata"]["identifier"]["value"] for volume in volumes],
+            ["ISBN 111", "ISBN 222"],
+        )
+        self.assertEqual(
+            [volume["effective_metadata"]["publication_year"]["value"]
+             for volume in volumes],
+            [2002, 2003],
         )
 
-    def test_copy_identifier_can_keep_shared_edition_identifier(self) -> None:
+    def test_volume_identifier_can_coexist_with_edition_identifier(self) -> None:
         first = sample_book("Volume identifiers coexist")
         first.edition.identifier = "ISBN SET"
-        first.copy_.identifier = ""
-        first.copy_.volume_number = "1"
+        first.volume.volume_number = "1"
         inherited = create_book(first, self.path)
 
         second = sample_book("Volume identifiers coexist")
         second.edition.identifier = "ISBN SET"
-        second.copy_.identifier = "ISBN VOLUME-2"
-        second.copy_.volume_number = "2"
-        with self.assertRaises(CopyIdentifierTransitionRequired):
-            create_book(second, self.path)
-        self.assertEqual(len(list_books(path=self.path)), 1)
-
-        second.copy_.identifier_transition = "keep"
+        second.volume.identifier = "ISBN VOLUME-2"
+        second.volume.volume_number = "2"
         explicit = create_book(second, self.path)
 
         inherited_record = get_book(inherited["id"], self.path)
         explicit_record = get_book(explicit["id"], self.path)
         assert inherited_record is not None and explicit_record is not None
-        self.assertEqual(inherited_record["copy"]["identifier"], "")
-        self.assertEqual(inherited_record["copy"]["effective_identifier"], "ISBN SET")
-        self.assertEqual(explicit_record["copy"]["identifier"], "ISBN VOLUME-2")
+        self.assertEqual(inherited_record["volume"]["identifier"], "")
+        self.assertEqual(inherited_record["volume"]["effective_metadata"]["identifier"]["value"], "ISBN SET")
+        self.assertEqual(explicit_record["volume"]["identifier"], "ISBN VOLUME-2")
         self.assertEqual(explicit_record["edition"]["identifier"], "ISBN SET")
 
-        third = sample_book("Volume identifiers coexist")
-        third.edition.identifier = "ISBN SET"
-        third.copy_.identifier = "ISBN VOLUME-3"
-        third.copy_.volume_number = "3"
-        create_book(third, self.path)
-        self.assertEqual(len(list_books(path=self.path)), 3)
-
-    def test_copy_identifier_can_demote_edition_identifier(self) -> None:
+    def test_edition_identifier_can_be_moved_explicitly_to_volume(self) -> None:
         first = sample_book("Volume identifier demotion")
         first.edition.identifier = "ISBN SET"
-        first.copy_.identifier = ""
-        first.copy_.volume_number = "1"
+        first.volume.volume_number = "1"
         inherited = create_book(first, self.path)
 
         second = sample_book("Volume identifier demotion")
         second.edition.identifier = "ISBN SET"
-        second.copy_.identifier = "ISBN VOLUME-2"
-        second.copy_.identifier_transition = "demote"
-        second.copy_.volume_number = "2"
+        second.volume.identifier = "ISBN VOLUME-2"
+        second.volume.volume_number = "2"
         explicit = create_book(second, self.path)
 
+        moved = move_edition_identifier_to_volume(
+            inherited["edition_id"], inherited["volume_id"], self.path
+        )
+        self.assertIsNotNone(moved)
         inherited_record = get_book(inherited["id"], self.path)
         explicit_record = get_book(explicit["id"], self.path)
         assert inherited_record is not None and explicit_record is not None
-        self.assertEqual(inherited_record["copy"]["identifier"], "ISBN SET")
-        self.assertEqual(inherited_record["copy"]["effective_identifier"], "ISBN SET")
-        self.assertEqual(explicit_record["copy"]["identifier"], "ISBN VOLUME-2")
+        self.assertEqual(inherited_record["volume"]["identifier"], "ISBN SET")
+        self.assertEqual(explicit_record["volume"]["identifier"], "ISBN VOLUME-2")
         self.assertEqual(explicit_record["edition"]["identifier"], "")
 
-    def test_editing_first_distinct_copy_identifier_requires_a_decision(self) -> None:
+    def test_editing_volume_identifier_does_not_mutate_edition_identifier(self) -> None:
         first = sample_book("Edit volume identifier")
         first.edition.identifier = "ISBN SET"
-        first.copy_.volume_number = "1"
+        first.volume.volume_number = "1"
         create_book(first, self.path)
         second = sample_book("Edit volume identifier")
         second.edition.identifier = "ISBN SET"
-        second.copy_.volume_number = "2"
+        second.volume.volume_number = "2"
         second_record = create_book(second, self.path)
 
-        changed = CopyInput(
-            volume_number="2", identifier="ISBN VOLUME-2", location="Shelf"
+        changed = update_volume_details(
+            second_record["volume_id"],
+            VolumeInput(volume_number="2", identifier="ISBN VOLUME-2"),
+            self.path,
         )
-        with self.assertRaises(CopyIdentifierTransitionRequired):
-            update_copy_details(second_record["id"], changed, self.path)
-        changed.identifier_transition = "demote"
-        update_copy_details(second_record["id"], changed, self.path)
-
+        self.assertIsNotNone(changed)
         books = list_books(path=self.path)
-        self.assertEqual({book["edition"]["identifier"] for book in books}, {""})
+        self.assertEqual({book["edition"]["identifier"] for book in books}, {"ISBN SET"})
         self.assertEqual(
-            {book["copy"]["identifier"] for book in books},
-            {"ISBN SET", "ISBN VOLUME-2"},
+            {book["volume"]["identifier"] for book in books},
+            {"", "ISBN VOLUME-2"},
         )
 
     def test_shared_identifier_does_not_override_different_version(self) -> None:
@@ -419,7 +601,7 @@ class RepositoryTests(unittest.TestCase):
     def test_force_new_edition_preserves_identical_editions_across_initialize(self) -> None:
         first = sample_book()
         second = sample_book()
-        second.copy_.volume_number = "2"
+        second.volume.volume_number = "2"
         second.edition.force_new_edition = True
 
         create_book(first, self.path)
@@ -432,23 +614,23 @@ class RepositoryTests(unittest.TestCase):
 
         another_copy = sample_book()
         another_copy.edition.existing_edition_id = forced["edition_id"]
-        another_copy.copy_.volume_number = "3"
+        another_copy.volume.volume_number = "3"
         create_book(another_copy, self.path)
         detail = get_work(detail["id"], self.path)
         assert detail is not None
         forced_group = next(
             group for group in detail["editions"] if group["id"] == forced["edition_id"]
         )
-        self.assertEqual(len(forced_group["copies"]), 2)
+        self.assertEqual(sum(len(group["copies"]) for group in forced_group["volumes"]), 2)
 
     def test_translator_and_edition_scripts_split_editions(self) -> None:
         first = sample_book()
         second = sample_book()
         second.edition.translator = "另一譯者"
-        second.copy_.volume_number = "2"
+        second.volume.volume_number = "2"
         third = sample_book()
         third.edition.edition_scripts = "藏文"
-        third.copy_.volume_number = "3"
+        third.volume.volume_number = "3"
 
         create_book(first, self.path)
         create_book(second, self.path)
@@ -535,7 +717,7 @@ class RepositoryTests(unittest.TestCase):
         book = sample_book("自然卷冊")
         records = create_books_batch(BookBatchInput(
             work=book.work, edition=book.edition, copy=book.copy_,
-            volumes=["1", "1.10", "2", "1.2", "11", "10"],
+            volume_numbers=["1", "1.10", "2", "1.2", "11", "10"],
             volume_titles=["", "One ten", "", "One two", "", ""],
         ), self.path)
         self.assertEqual(len(records), 6)
@@ -543,12 +725,12 @@ class RepositoryTests(unittest.TestCase):
         assert detail is not None
         self.assertEqual(len(detail["editions"]), 1)
         self.assertEqual(
-            [copy["volume_number"] for copy in detail["editions"][0]["copies"]],
-            ["1", "1.2", "1.10", "2", "10", "11"],
+            [group["volume"]["volume_number"] for group in detail["editions"][0]["volumes"]],
+            ["1", "1.10", "2", "1.2", "11", "10"],
         )
         self.assertEqual(
-            [copy["volume_title"] for copy in detail["editions"][0]["copies"]],
-            ["", "One two", "One ten", "", "", ""],
+            [group["volume"]["volume_title"] for group in detail["editions"][0]["volumes"]],
+            ["", "One ten", "", "One two", "", ""],
         )
 
     def test_effective_scripts_aggregate_from_each_edition(self) -> None:
@@ -625,27 +807,34 @@ class RepositoryTests(unittest.TestCase):
         assert detail is not None
         edition_id = detail["editions"][0]["id"]
 
-        work = update_work_details(summary["id"], WorkInput(title="新題名", authors="新作者"), self.path)
+        work = update_work_details(
+            summary["id"], WorkInput(title="New title", authors="New author"), self.path
+        )
         edition = update_edition_details(
             edition_id,
-            EditionInput(version="修訂版", identifier="NEW-ISBN", publisher="新出版社"),
+            EditionInput(version="Revised", identifier="NEW-ISBN", publisher="New Press"),
             self.path,
         )
+        volume = update_volume_details(
+            created["volume_id"], VolumeInput(volume_number="3"), self.path
+        )
         copy = update_copy_details(
-            created["id"], CopyInput(volume="3", location="新位置", reading_record="重讀"), self.path
+            created["id"],
+            CopyUpdateInput(location="New location", reading_record="Reread"),
+            self.path,
         )
 
-        assert work is not None and edition is not None and copy is not None
-        self.assertEqual(work["work"]["title"], "新題名")
-        self.assertEqual(edition["editions"][0]["edition"]["version"], "修訂版")
-        self.assertEqual(copy["copy"]["volume_number"], "3")
-        self.assertEqual(copy["copy"]["location"], "新位置")
+        assert all(item is not None for item in (work, edition, volume, copy))
+        self.assertEqual(work["work"]["title"], "New title")
+        self.assertEqual(edition["editions"][0]["edition"]["version"], "Revised")
+        self.assertEqual(volume["volume_number"], "3")
+        self.assertEqual(copy["location"], "New location")
 
     def test_searches_all_required_fields(self) -> None:
         book = sample_book()
         book.edition.version = "珍藏版"
         book.edition.translated_subtitle = "魔幻家族史"
-        book.copy_.identifier = "ISBN COPY-UNIQUE"
+        book.volume.identifier = "ISBN COPY-UNIQUE"
         create_book(book, self.path)
         terms = ["百年", "加西亚", "葉淑吟", "珍藏版", "魔幻家族史", "978957", "COPY-UNIQUE", "皇冠", "2018", "1.2.3", "2024-01-03", "A 架", "已讀"]
         for term in terms:
@@ -693,11 +882,11 @@ class RepositoryTests(unittest.TestCase):
 
     def test_volume_number_and_title_are_stored_and_sorted_together(self) -> None:
         first = sample_book("Multi-volume Work")
-        first.copy_.volume_number = "2"
-        first.copy_.volume_title = "Later Part"
+        first.volume.volume_number = "2"
+        first.volume.volume_title = "Later Part"
         second = sample_book("Multi-volume Work")
-        second.copy_.volume_number = "1"
-        second.copy_.volume_title = "Opening Part"
+        second.volume.volume_number = "1"
+        second.volume.volume_title = "Opening Part"
 
         create_book(first, self.path)
         create_book(second, self.path)
@@ -707,10 +896,10 @@ class RepositoryTests(unittest.TestCase):
         self.assertEqual(len(list_books("Opening Part", self.path)), 1)
         self.assertEqual(
             [
-                (copy["volume_number"], copy["volume_title"])
-                for copy in detail["editions"][0]["copies"]
+                (group["volume"]["volume_number"], group["volume"]["volume_title"])
+                for group in detail["editions"][0]["volumes"]
             ],
-            [("1", "Opening Part"), ("2", "Later Part")],
+            [("2", "Later Part"), ("1", "Opening Part")],
         )
 
 
@@ -745,12 +934,15 @@ class RepositoryTests(unittest.TestCase):
             1,
         )
 
+        linked_volume = create_volume_record(
+            edition_id, VolumeInput(volume_number="2"), self.path
+        )
         updated = update_work_details(linked_work_id, WorkInput.model_validate({
             **linked_work["work"],
             "edition_relations": [{
                 "edition_id": edition_id,
                 "relation_type": "volume",
-                "volume_number": "2",
+                "volume_id": linked_volume["id"],
             }],
         }), self.path)
         assert updated is not None
@@ -759,8 +951,8 @@ class RepositoryTests(unittest.TestCase):
             if item["work_id"] == linked_work_id
         )
         self.assertEqual(
-            (relation["relation_type"], relation["volume_number"]),
-            ("volume", "2"),
+            (relation["relation_type"], relation["volume_id"]),
+            ("volume", linked_volume["id"]),
         )
 
         detached = update_work_details(linked_work_id, WorkInput.model_validate({
@@ -785,18 +977,25 @@ class RepositoryTests(unittest.TestCase):
 
     def test_new_work_can_define_its_relation_type_before_it_has_an_id(self) -> None:
         payload = sample_book("New Volume Work").model_dump(by_alias=True)
+        payload["volume"]["volume_number"] = "VII"
         payload["edition"]["work_relations"] = [
-            {"work_id": 0, "relation_type": "volume", "volume_number": "VII"}
+            {"work_id": 0, "relation_type": "volume", "volume_id": None}
         ]
 
         created = create_book(BookInput.model_validate(payload), self.path)
 
         work_id = list_works("New Volume Work", self.path)[0]["id"]
-        self.assertEqual(created["edition"]["work_relations"], [{
-            "work_id": work_id,
-            "relation_type": "volume",
-            "volume_number": "VII",
-        }])
+        relation = created["edition"]["work_relations"][0]
+        self.assertEqual(relation["work_id"], work_id)
+        self.assertEqual(relation["relation_type"], "volume")
+        self.assertIsInstance(relation["volume_id"], int)
+        self.assertEqual(
+            relation["volume_id"],
+            next(
+                group["id"] for group in get_work(work_id, self.path)["editions"][0]["volumes"]
+                if group["volume"]["volume_number"] == "VII"
+            ),
+        )
 
     def test_edition_work_relations_distinguish_volumes_from_contained_works(self) -> None:
         first_copy = create_book(sample_book("Tragedy A"), self.path)
@@ -812,17 +1011,17 @@ class RepositoryTests(unittest.TestCase):
         assert detail is not None
         edition_id = detail["editions"][0]["id"]
         edition_data = detail["editions"][0]["edition"]
+        first_volume_id = detail["editions"][0]["volumes"][0]["id"]
+        second_volume = create_volume_record(
+            edition_id, VolumeInput(volume_number="2"), self.path
+        )
         edition = EditionInput.model_validate({
             **edition_data,
             "work_ids": [],
             "work_relations": [
-                {"work_id": work_ids[0], "relation_type": "volume", "volume_number": "1"},
-                {"work_id": work_ids[1], "relation_type": "volume", "volume_number": "2"},
-                {
-                    "work_id": work_ids[2],
-                    "relation_type": "contained",
-                    "volume_number": "must be discarded",
-                },
+                {"work_id": work_ids[0], "relation_type": "volume", "volume_id": first_volume_id},
+                {"work_id": work_ids[1], "relation_type": "volume", "volume_id": second_volume["id"]},
+                {"work_id": work_ids[2], "relation_type": "contained"},
             ],
         })
 
@@ -831,11 +1030,23 @@ class RepositoryTests(unittest.TestCase):
         assert updated is not None
         group = next(item for item in updated["editions"] if item["id"] == edition_id)
         self.assertEqual(group["edition"]["work_ids"], work_ids)
-        self.assertEqual(group["edition"]["work_relations"], [
-            {"work_id": work_ids[0], "relation_type": "volume", "volume_number": "1"},
-            {"work_id": work_ids[1], "relation_type": "volume", "volume_number": "2"},
-            {"work_id": work_ids[2], "relation_type": "contained", "volume_number": ""},
-        ])
+        relations = group["edition"]["work_relations"]
+        self.assertEqual(
+            [(item["work_id"], item["relation_type"], item["volume_id"]) for item in relations],
+            [
+                (work_ids[0], "volume", first_volume_id),
+                (work_ids[1], "volume", second_volume["id"]),
+                (work_ids[2], "contained", None),
+            ],
+        )
+        self.assertTrue(all(
+            item["volume_id"] is not None for item in relations[:2]
+        ))
+        self.assertIsNone(relations[2]["volume_id"])
+        volume_ids = {
+            volume_group["id"] for volume_group in group["volumes"]
+        }
+        self.assertTrue({item["volume_id"] for item in relations[:2]} <= volume_ids)
         linked = get_book(first_copy["id"], self.path)
         assert linked is not None
         self.assertEqual(linked["edition"]["work_relations"], group["edition"]["work_relations"])
@@ -868,7 +1079,7 @@ class RepositoryTests(unittest.TestCase):
         assert linked_from_first is not None
         self.assertEqual(
             next(group for group in linked_from_first["editions"] if group["id"] == shared_edition_id)
-                ["copies"][0]["id"],
+                ["volumes"][0]["copies"][0]["id"],
             first_copy["id"],
         )
         self.assertEqual(len(list_books("Independent Work A", self.path)), 1)
@@ -888,6 +1099,32 @@ class RepositoryTests(unittest.TestCase):
         self.assertEqual(surviving["edition"]["work_ids"], [second_work_id])
 
 
+
+    def test_deleting_volume_retains_edition_and_removes_its_copies(self) -> None:
+        first = create_book(sample_book("Delete Volume"), self.path)
+        second = create_copy_for_volume(
+            first["volume_id"], CopyInput(location="Second"), self.path
+        )
+        result = delete_volume(first["volume_id"], self.path)
+        self.assertEqual(result["deleted_copy_count"], 2)
+        self.assertTrue(result["edition_retained"])
+        connection = connect(self.path)
+        try:
+            self.assertEqual(
+                connection.execute("SELECT COUNT(*) FROM editions").fetchone()[0],
+                1,
+            )
+            self.assertEqual(
+                connection.execute("SELECT COUNT(*) FROM volumes").fetchone()[0],
+                0,
+            )
+            self.assertEqual(
+                connection.execute("SELECT COUNT(*) FROM copies").fetchone()[0],
+                0,
+            )
+        finally:
+            connection.close()
+
     def test_delete_operations_cover_every_managed_layer(self) -> None:
         first = create_book(sample_book("Delete Copies"), self.path)
         second = create_book(sample_book("Delete Copies"), self.path)
@@ -900,9 +1137,12 @@ class RepositoryTests(unittest.TestCase):
 
         second_result = delete_copy(second["id"], self.path)
         assert second_result is not None
-        self.assertTrue(second_result["edition_deleted"])
-        self.assertTrue(second_result["work_deleted"])
-        self.assertIsNone(get_work(work_id, self.path))
+        self.assertFalse(second_result["edition_deleted"])
+        self.assertFalse(second_result["work_deleted"])
+        retained = get_work(work_id, self.path)
+        assert retained is not None
+        self.assertEqual(len(retained["editions"][0]["volumes"]), 1)
+        self.assertEqual(retained["editions"][0]["volumes"][0]["copies"], [])
 
         edition_book = create_book(sample_book("Delete Edition"), self.path)
         edition_work = list_works("Delete Edition", self.path)[0]

@@ -91,18 +91,18 @@ def normalize_identifier_text(value: object) -> object:
 
 
 class CleanModel(BaseModel):
-    model_config = ConfigDict(str_strip_whitespace=True)
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
 
 
 class WorkEditionRelation(CleanModel):
     edition_id: int
     relation_type: Literal["volume", "contained"] = "contained"
-    volume_number: str = Field(default="", max_length=100)
+    volume_id: int | None = None
 
     @model_validator(mode="after")
-    def volume_number_only_applies_to_volumes(self) -> "WorkEditionRelation":
+    def normalize_relation(self) -> "WorkEditionRelation":
         if self.relation_type == "contained":
-            self.volume_number = ""
+            self.volume_id = None
         return self
 
 
@@ -135,12 +135,12 @@ class WorkInput(CleanModel):
 class EditionWorkRelation(CleanModel):
     work_id: int
     relation_type: Literal["volume", "contained"] = "contained"
-    volume_number: str = Field(default="", max_length=100)
+    volume_id: int | None = None
 
     @model_validator(mode="after")
-    def volume_number_only_applies_to_volumes(self) -> "EditionWorkRelation":
+    def normalize_relation(self) -> "EditionWorkRelation":
         if self.relation_type == "contained":
-            self.volume_number = ""
+            self.volume_id = None
         return self
 
 
@@ -212,29 +212,51 @@ class EditionInput(CleanModel):
         return years[0] if len(years) == 1 or years[0] == years[1] else f"{years[0]}\u2013{years[1]}"
 
 
-class CopyInput(CleanModel):
+class VolumeInput(CleanModel):
+    id: int | None = None
+    position: int | None = Field(default=None, ge=0)
     volume_number: str = Field(default="", max_length=100)
     volume_title: str = Field(default="", max_length=500)
     identifier: str = Field(default="", max_length=1000)
-    effective_identifier: str = ""
-    identifier_transition: Literal["keep", "demote"] | None = None
-    acquisition_date: date | None = None
-    location: str = Field(default="", max_length=500)
-    reading_record: str = Field(default="", max_length=5000)
-
-
-    @model_validator(mode="before")
-    @classmethod
-    def accept_legacy_volume(cls, value: object) -> object:
-        if isinstance(value, dict) and "volume_number" not in value and "volume" in value:
-            value = dict(value)
-            value["volume_number"] = value["volume"]
-        return value
+    version: str = Field(default="", max_length=200)
+    publication_year: int | str | None = None
+    responsibility: str = Field(default="", max_length=1000)
 
     @field_validator("identifier", mode="before")
     @classmethod
     def normalize_identifiers(cls, value: object) -> object:
         return normalize_identifier_text(value)
+
+    @field_validator("version", mode="before")
+    @classmethod
+    def normalize_versions(cls, value: object) -> object:
+        return normalize_version_text(value)
+
+    @field_validator("responsibility", mode="before")
+    @classmethod
+    def normalize_responsibility(cls, value: object) -> object:
+        return normalize_semicolon_text(value)
+
+    @field_validator("publication_year", mode="before")
+    @classmethod
+    def normalize_publication_year(cls, value: object) -> object:
+        if value in (None, ""):
+            return None
+        text = str(value).strip().replace("—", "–").replace("-", "–")
+        parts = text.split("–")
+        if len(parts) not in {1, 2} or not all(part.isdigit() for part in parts):
+            raise ValueError("冊級出版年份應為年份或年份範圍，例如 2002–2003")
+        years = [int(part) for part in parts]
+        if any(year < 0 or year > 9999 for year in years) or years != sorted(years):
+            raise ValueError("冊級出版年份範圍無效")
+        return years[0] if len(years) == 1 or years[0] == years[1] else f"{years[0]}–{years[1]}"
+
+
+class CopyInput(CleanModel):
+    volume_id: int | None = None
+    acquisition_date: date | None = None
+    location: str = Field(default="", max_length=500)
+    reading_record: str = Field(default="", max_length=5000)
 
     @field_validator("acquisition_date", mode="before")
     @classmethod
@@ -242,28 +264,32 @@ class CopyInput(CleanModel):
         return None if value in (None, "") else value
 
 
+class CopyUpdateInput(CopyInput):
+    pass
+
+
 class BookInput(BaseModel):
-    model_config = ConfigDict(populate_by_name=True)
+    model_config = ConfigDict(populate_by_name=True, extra="forbid")
 
     work: WorkInput
     edition: EditionInput
+    volume: VolumeInput = Field(default_factory=VolumeInput)
     copy_: CopyInput = Field(alias="copy")
 
 
+
+
 class BookBatchInput(BaseModel):
+    model_config = ConfigDict(populate_by_name=True, extra="forbid")
+
     work: WorkInput
     edition: EditionInput
+    volume: VolumeInput = Field(default_factory=VolumeInput)
     copy_: CopyInput = Field(alias="copy")
     volume_numbers: list[str] = Field(min_length=1, max_length=500)
     volume_titles: list[str] = Field(default_factory=list, max_length=500)
 
-    @model_validator(mode="before")
-    @classmethod
-    def accept_legacy_volumes(cls, value: object) -> object:
-        if isinstance(value, dict) and "volume_numbers" not in value and "volumes" in value:
-            value = dict(value)
-            value["volume_numbers"] = value["volumes"]
-        return value
+
 
     @field_validator("volume_numbers", mode="before")
     @classmethod
@@ -280,29 +306,90 @@ class BookBatchInput(BaseModel):
         return [str(item).strip() for item in (value or [])]
 
 
+class VolumeRecord(BaseModel):
+    id: int
+    edition_id: int
+    position: int
+    volume_number: str
+    volume_title: str
+    identifier: str
+    version: str
+    publication_year: int | str | None
+    responsibility: str
+    effective_metadata: dict[str, object] = Field(default_factory=dict)
+
+
+class CopyRecord(BaseModel):
+    volume_id: int
+    acquisition_date: date | None
+    location: str
+    reading_record: str
+
+
 class BookRecord(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
     id: int
     edition_id: int
+    volume_id: int
     work: WorkInput
     edition: EditionInput
-    copy_: CopyInput = Field(alias="copy")
+    volume: VolumeRecord
+    edition_effective_metadata: dict[str, object] = Field(default_factory=dict)
+    copy_: CopyRecord = Field(alias="copy")
+
+
+class WorkReference(BaseModel):
+    id: int
+    title: str
+    subtitle: str = ""
+    authors: str = ""
+    scripts: str = ""
+
+
+class CopyDetail(BaseModel):
+    id: int
+    volume_id: int
+    edition_id: int | None = None
+    acquisition_date: date | None
+    location: str
+    reading_record: str
+    effective_metadata: dict[str, object] = Field(default_factory=dict)
+
+
+class EditionIdentifierMoveInput(BaseModel):
+    volume_id: int
 
 
 class CopySummary(BaseModel):
     id: int
-    volume_number: str
-    volume_title: str
-    identifier: str
-    effective_identifier: str
+    volume_id: int
+    acquisition_date: date | None = None
     location: str
+    reading_record: str = ""
+
+
+class VolumeGroup(BaseModel):
+    id: int
+    volume: VolumeRecord
+    copies: list[CopySummary]
+
+
+class VolumeDetail(BaseModel):
+    id: int
+    volume: VolumeRecord
+    copies: list[CopyDetail]
 
 
 class EditionGroup(BaseModel):
     id: int
     edition: EditionInput
-    copies: list[CopySummary]
+    effective_metadata: dict[str, object] = Field(default_factory=dict)
+    volumes: list[VolumeGroup]
+
+
+class EditionDetail(EditionGroup):
+    works: list[WorkReference] = Field(default_factory=list)
 
 
 class EditionSummary(BaseModel):
@@ -320,6 +407,8 @@ class EditionSummary(BaseModel):
     edition_scripts: str
     work_ids: list[int]
     work_relations: list[EditionWorkRelation]
+    effective_metadata: dict[str, object] = Field(default_factory=dict)
+    volume_count: int
     copy_count: int
 
 
@@ -355,6 +444,7 @@ class WorkSummary(BaseModel):
     authors: str
     scripts: str
     edition_count: int
+    volume_count: int
     copy_count: int
     tags: list[TagRecord]
     publishers: list[str]

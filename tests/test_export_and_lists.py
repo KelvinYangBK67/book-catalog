@@ -1,16 +1,21 @@
 from __future__ import annotations
 
+import csv
 import json
 import os
 import tempfile
 import unittest
+from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
 
 from app.database import initialize
 from app.export import export_csv, export_json
 from app.repository import create_book, create_tag, get_work, list_works, update_tag
-from app.schemas import BookInput, CopyInput, EditionInput, TagInput, WorkInput
+from app.schemas import (
+    BookInput, CopyInput, EditionInput, TagInput, VolumeInput, WorkInput,
+    normalize_version_text,
+)
 
 
 class ListNormalizationTests(unittest.TestCase):
@@ -88,46 +93,55 @@ class ListNormalizationTests(unittest.TestCase):
 class ExportTests(unittest.TestCase):
     def test_json_and_csv_exports_include_complete_copy_data(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            database = str(Path(directory) / 'export.db')
-            with patch.dict(os.environ, {'LIBRARY_DATABASE': database}):
+            database = str(Path(directory) / "export.db")
+            with patch.dict(os.environ, {"LIBRARY_DATABASE": database}):
                 initialize()
-                tag = create_tag(TagInput(name='Buddhism'))
+                tag = create_tag(TagInput(name="Buddhism"))
                 create_book(BookInput(
                     work=WorkInput(
-                        title='Export Test', authors='One; Two',
-                        scripts='Tibetan; Chinese', tag_ids=[tag['id']],
+                        title="Export Test", authors="One; Two",
+                        scripts="Tibetan; Chinese", tag_ids=[tag["id"]],
                     ),
                     edition=EditionInput(
-                        identifier='ISSN 1234-5678; ISBN 978-1-2-3 (pbk.)',
-                        version='2; Revised', publisher='Test Press',
+                        identifier="ISSN 1234-5678; ISBN 978-1-2-3 (pbk.)",
+                        version="2; Revised", publisher="Test Press",
                     ),
-                    copy=CopyInput(
-                        identifier='ISBN 978-1-2-4', location='Study', reading_record='Read'
-                    ),
+                    volume=VolumeInput(identifier="ISBN 978-1-2-4"),
+                    copy=CopyInput(location="Study", reading_record="Read"),
                 ))
 
                 json_response = export_json()
                 csv_response = export_csv()
 
             exported = json.loads(json_response.body)
-            self.assertEqual(exported[0]['work']['tag_names'], ['Buddhism'])
-            self.assertEqual(exported[0]['edition']['version'], '第2版; Revised')
+            self.assertEqual(exported["schema_version"], 2)
+            self.assertEqual(exported["model"], "Work-Edition-Volume-Copy")
+            self.assertEqual(exported["works"][0]["tag_names"], ["Buddhism"])
             self.assertEqual(
-                exported[0]['edition']['identifier'],
-                'ISSN 1234-5678; ISBN 978-1-2-3',
+                exported["editions"][0]["version"], normalize_version_text("2; Revised")
             )
-            csv_text = csv_response.body.decode('utf-8-sig')
-            self.assertIn('copy_id,title,subtitle,authors', csv_text)
-            self.assertIn('other_title,other_subtitle', csv_text)
-            self.assertIn('edition_title,edition_subtitle', csv_text)
-            self.assertIn('work_ids,work_relations,identifier', csv_text)
-            self.assertIn('volume_number,volume_title,copy_identifier', csv_text)
-            self.assertIn('edition_scripts', csv_text)
-            self.assertIn('Export Test', csv_text)
-            self.assertIn('ISSN 1234-5678; ISBN 978-1-2-3', csv_text)
-            self.assertIn('ISBN 978-1-2-4', csv_text)
-            self.assertIn('Read', csv_text)
+            self.assertEqual(
+                exported["editions"][0]["identifier"],
+                "ISSN 1234-5678; ISBN 978-1-2-3",
+            )
+            self.assertEqual(
+                exported["volumes"][0]["identifier"], "ISBN 978-1-2-4"
+            )
+            self.assertEqual(exported["copies"][0]["reading_record"], "Read")
 
+            csv_text = csv_response.body.decode("utf-8-sig")
+            rows = list(csv.DictReader(StringIO(csv_text)))
+            self.assertEqual(len(rows), 1)
+            row = rows[0]
+            self.assertEqual(row["schema_version"], "2")
+            self.assertEqual(row["work_title"], "Export Test")
+            self.assertEqual(
+                row["edition_identifier"], "ISSN 1234-5678; ISBN 978-1-2-3"
+            )
+            self.assertEqual(row["volume_identifier"], "ISBN 978-1-2-4")
+            self.assertEqual(row["copy_location"], "Study")
+            self.assertEqual(row["copy_reading_record"], "Read")
+            self.assertNotIn("copy_identifier", row)
 
 if __name__ == '__main__':
     unittest.main()

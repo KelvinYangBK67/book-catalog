@@ -12,18 +12,20 @@ from fastapi.staticfiles import StaticFiles
 from .database import initialize
 from .export import router as export_router
 from .import_csv import router as import_router
+from .import_json import router as import_json_router
 from .repository import (
-    CopyIdentifierTransitionRequired,
-    create_book, create_books_batch, create_tag, create_work_record, delete_copy, delete_edition, delete_publisher,
-    delete_tag, delete_work, get_book, get_work, list_books, list_editions,
+    create_book, create_books_batch, create_copy_for_volume, create_tag,
+    create_volume_record, create_work_record, delete_copy, delete_edition, delete_publisher, delete_volume,
+    delete_tag, delete_work, get_book, get_copy_details, get_edition, get_volume_detail, get_work, list_books, list_editions,
     list_publisher_names, list_publishers, list_tag_violations, list_tags, list_works, normalize_publisher,
-    update_book, update_copy_details,
-    update_edition_details, update_tag, update_work_details,
+    move_edition_identifier_to_volume, update_book, update_copy_details, update_edition_details,
+    update_tag, update_volume_details, update_work_details,
 )
 from .schemas import (
-    BookBatchInput, BookInput, BookRecord, CopyInput, EditionInput, EditionSummary,
+    BookBatchInput, BookInput, BookRecord, CopyDetail, CopyInput, CopyUpdateInput,
+    EditionDetail, EditionIdentifierMoveInput, EditionInput, EditionSummary,
     PublisherNormalizationInput, PublisherRecord, TagInput, TagRecord,
-    WorkDetail, WorkInput, WorkSummary,
+    VolumeDetail, VolumeInput, WorkDetail, WorkInput, WorkSummary,
 )
 
 
@@ -41,24 +43,13 @@ async def lifespan(_: FastAPI):
     yield
 
 
-app = FastAPI(title="紙質書管理系統", version="0.6.0", lifespan=lifespan)
+app = FastAPI(title="紙質書管理系統", version="0.7.0", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=STATIC), name="static")
 app.include_router(export_router)
 app.include_router(import_router)
+app.include_router(import_json_router)
 if IMPE_FONTS.is_dir():
     app.mount("/fonts", StaticFiles(directory=IMPE_FONTS), name="fonts")
-
-
-def identifier_transition_response(error: CopyIdentifierTransitionRequired) -> HTTPException:
-    return HTTPException(
-        status_code=409,
-        detail={
-            "code": "copy_identifier_transition_required",
-            "message": str(error),
-            "edition_id": error.edition_id,
-            "edition_identifier": error.edition_identifier,
-        },
-    )
 
 
 @app.get("/", include_in_schema=False)
@@ -118,10 +109,39 @@ def remove_work(work_id: int) -> dict:
     return {"deleted": True}
 
 
-@app.put("/api/editions/{edition_id}", response_model=WorkDetail)
+@app.get("/api/editions/{edition_id}", response_model=EditionDetail)
+def edition(edition_id: int) -> dict:
+    record = get_edition(edition_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="找不到此版本")
+    return record
+
+
+@app.put("/api/editions/{edition_id}", response_model=EditionDetail)
 def edit_edition(edition_id: int, payload: EditionInput) -> dict:
     try:
         record = update_edition_details(edition_id, payload)
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    if record is None:
+        raise HTTPException(status_code=404, detail="找不到此版本")
+    detail = get_edition(edition_id)
+    if detail is None:
+        raise HTTPException(status_code=404, detail="找不到此版本")
+    return detail
+
+
+@app.post(
+    "/api/editions/{edition_id}/move-identifier-to-volume",
+    response_model=EditionDetail,
+)
+def move_edition_identifier(
+    edition_id: int, payload: EditionIdentifierMoveInput
+) -> dict:
+    try:
+        record = move_edition_identifier_to_volume(
+            edition_id, payload.volume_id
+        )
     except ValueError as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
     if record is None:
@@ -137,22 +157,90 @@ def remove_edition(edition_id: int) -> dict:
     return {"deleted": True, **result}
 
 
-@app.put("/api/copies/{copy_id}", response_model=BookRecord)
-def edit_copy(copy_id: int, payload: CopyInput) -> dict:
+@app.get("/api/copies/{copy_id}", response_model=CopyDetail)
+def copy(copy_id: int) -> dict:
+    record = get_copy_details(copy_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="找不到此實物副本")
+    return record
+
+
+@app.put("/api/copies/{copy_id}", response_model=CopyDetail)
+def edit_copy(copy_id: int, payload: CopyUpdateInput) -> dict:
     try:
         record = update_copy_details(copy_id, payload)
-    except CopyIdentifierTransitionRequired as error:
-        raise identifier_transition_response(error) from error
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
     if record is None:
-        raise HTTPException(status_code=404, detail="找不到此實物冊")
+        raise HTTPException(status_code=404, detail="找不到此實物副本")
     return record
+
+
+@app.post(
+    "/api/editions/{edition_id}/volumes",
+    response_model=VolumeDetail,
+    status_code=status.HTTP_201_CREATED,
+)
+def add_volume(edition_id: int, payload: VolumeInput) -> dict:
+    try:
+        record = create_volume_record(edition_id, payload)
+        detail = get_volume_detail(record["id"])
+        assert detail is not None
+        return detail
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+
+
+@app.get("/api/volumes/{volume_id}", response_model=VolumeDetail)
+def volume(volume_id: int) -> dict:
+    record = get_volume_detail(volume_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="找不到此冊")
+    return record
+
+
+@app.put("/api/volumes/{volume_id}", response_model=VolumeDetail)
+def edit_volume(volume_id: int, payload: VolumeInput) -> dict:
+    try:
+        updated = update_volume_details(volume_id, payload)
+        record = get_volume_detail(volume_id) if updated is not None else None
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    if record is None:
+        raise HTTPException(status_code=404, detail="找不到此冊")
+    return record
+
+
+
+
+@app.delete("/api/volumes/{volume_id}")
+def remove_volume(volume_id: int) -> dict:
+    try:
+        result = delete_volume(volume_id)
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    if result is None:
+        raise HTTPException(status_code=404, detail="找不到此冊")
+    return {"deleted": True, **result}
+
+
+@app.post(
+    "/api/volumes/{volume_id}/copies",
+    response_model=CopyDetail,
+    status_code=status.HTTP_201_CREATED,
+)
+def add_volume_copy(volume_id: int, payload: CopyInput) -> dict:
+    try:
+        return create_copy_for_volume(volume_id, payload)
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
 
 
 @app.delete("/api/copies/{copy_id}")
 def remove_copy(copy_id: int) -> dict:
     result = delete_copy(copy_id)
     if result is None:
-        raise HTTPException(status_code=404, detail="找不到此實物冊")
+        raise HTTPException(status_code=404, detail="找不到此實物副本")
     return {"deleted": True, **result}
 
 
@@ -227,8 +315,6 @@ def book(copy_id: int) -> dict:
 def add_book(payload: BookInput) -> dict:
     try:
         return create_book(payload)
-    except CopyIdentifierTransitionRequired as error:
-        raise identifier_transition_response(error) from error
     except ValueError as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
 
@@ -237,8 +323,6 @@ def add_book(payload: BookInput) -> dict:
 def add_books_batch(payload: BookBatchInput) -> list[dict]:
     try:
         return create_books_batch(payload)
-    except CopyIdentifierTransitionRequired as error:
-        raise identifier_transition_response(error) from error
     except ValueError as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
 
@@ -247,8 +331,6 @@ def add_books_batch(payload: BookBatchInput) -> list[dict]:
 def edit_book(copy_id: int, payload: BookInput) -> dict:
     try:
         record = update_book(copy_id, payload)
-    except CopyIdentifierTransitionRequired as error:
-        raise identifier_transition_response(error) from error
     except ValueError as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
     if record is None:

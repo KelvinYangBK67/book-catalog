@@ -1,3 +1,11 @@
+import {request, requestJson} from "./api.js";
+import {getBooleanPreference, getPreference, setPreference} from "./state.js";
+import {
+  actionMenu, closeActionMenus, updateDisclosureCounts
+} from "./components.js";
+import {escapeHtml, splitTerms} from "./formatters.js";
+import {editionRelations, groupCopies, groupedVolumes} from "./catalog-model.js";
+
 const list = document.querySelector('#book-list');
 const count = document.querySelector('#book-count');
 const notice = document.querySelector('#notice');
@@ -17,6 +25,7 @@ const collectionLayout = document.querySelector('.collection-layout');
 const workEditDialog = document.querySelector('#work-edit-dialog');
 const editionEditDialog = document.querySelector('#edition-edit-dialog');
 const copyEditDialog = document.querySelector('#copy-edit-dialog');
+const volumeEditDialog = document.querySelector('#volume-edit-dialog');
 const form = document.querySelector('#book-form');
 const saveButton = document.querySelector('#save-button');
 let works = [];
@@ -27,7 +36,10 @@ let editingWorkId = null;
 let smartWorkExclusions = new Map();
 let workOptions = [];
 let activeWork = null;
-let activeBook = null;
+let activeCopy = null;
+let activeVolume = null;
+let editingCopyId = null;
+let editingCopyVolumeId = null;
 let activeEdition = null;
 let activeTopEditionId = null;
 let tags = [];
@@ -37,16 +49,13 @@ let publisherNames = [];
 let selectedTagId = null;
 let importRows = [];
 
-const escapeHtml = (value) => String(value ?? '')
-  .replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;')
-  .replaceAll('"', '&quot;').replaceAll("'", '&#039;');
-const shown = (value) => value === null || value === undefined || value === '' ? '—' : escapeHtml(value);
+const shown = (value) => value === null || value === undefined || value === '' ? '' : escapeHtml(value);
 
 function shownLines(value) {
   const parts = splitTerms(value);
   return parts.length
     ? `<span class="multiline-value">${parts.map(escapeHtml).join('<br>')}</span>`
-    : '—';
+    : '';
 }
 
 function flash(message, type = 'success') {
@@ -55,51 +64,6 @@ function flash(message, type = 'success') {
   notice.hidden = false;
   setTimeout(() => { notice.hidden = true; }, 5000);
 }
-
-async function request(url, options) {
-  const response = await fetch(url, options);
-  if (!response.ok) {
-    let message = '操作失敗，請稍後再試。';
-    let errorData = {};
-    try {
-      const body = await response.json();
-      if (typeof body.detail === 'string') {
-        message = body.detail;
-      } else if (body.detail && typeof body.detail === 'object' && !Array.isArray(body.detail)) {
-        errorData = body.detail;
-        message = body.detail.message || message;
-      } else if (Array.isArray(body.detail)) {
-        message = body.detail.map((item) => {
-          const field = Array.isArray(item.loc) ? item.loc.filter((part) => part !== 'body').join(' → ') : '';
-          return field ? `${field}：${item.msg}` : item.msg;
-        }).join('；');
-      }
-    } catch (_) { /* response was not JSON */ }
-    const error = new Error(message);
-    error.status = response.status;
-    Object.assign(error, errorData);
-    throw error;
-  }
-  return response.json();
-}
-
-async function requestWithIdentifierDecision(url, options, payload) {
-  try {
-    return await request(url, {...options, body: JSON.stringify(payload)});
-  } catch (error) {
-    if (error.code !== 'copy_identifier_transition_required') throw error;
-    const demote = window.confirm(
-      '這是此多冊 Edition 首次填入不同的冊級識別號。\n\n'
-      + '目前 Edition 識別號：' + error.edition_identifier + '\n\n'
-      + '按「確定」：把原 Edition 識別號下沉到此前繼承它的冊，並清空 Edition 識別號。\n'
-      + '按「取消」：保留 Edition 識別號，與各冊識別號並存。'
-    );
-    const target = payload.copy || payload;
-    target.identifier_transition = demote ? 'demote' : 'keep';
-    return request(url, {...options, body: JSON.stringify(payload)});
-  }
-}
-
 
 async function loadWorks(query = '') {
   list.innerHTML = '<div class="empty">正在整理書架……</div>';
@@ -220,15 +184,16 @@ function commitTagPickerInput(picker) {
 function renderTagTree(parentId = null) {
   const children = tags.filter((tag) => tag.parent_id === parentId);
   if (!children.length) return '';
+  const collapsed = getBooleanPreference('tags-collapsed', false);
   return '<ul class="tag-tree-children">' + children.map((tag) => {
     const descendants = renderTagTree(tag.id);
     const toggle = descendants
-      ? '<button class="tag-tree-toggle" type="button" data-tag-toggle aria-expanded="true" aria-label="收合下級">▾</button>'
-      : '<span class="tag-tree-leaf" aria-hidden="true">└─</span>';
-    return '<li class="tag-tree-node"><div class="tag-tree-row">' + toggle
+      ? '<button class="tag-tree-toggle" type="button" data-tag-toggle aria-expanded="' + String(!collapsed) + '" aria-label="切換下級">▾</button>'
+      : '<span class="tag-tree-leaf" aria-hidden="true">·</span>';
+    return '<li class="tag-tree-node' + (descendants && collapsed ? ' is-collapsed' : '') + '"><div class="tag-tree-row">' + toggle
       + '<span class="tag-tree-label"><strong>' + escapeHtml(tag.name) + '</strong><small>'
       + (tag.has_children ? '分類' : tag.assigned_work_count + ' 部作品') + '</small></span>'
-      + '<button class="danger compact" type="button" data-delete-tag="' + tag.id + '">刪除</button></div>'
+      + '<button class="quiet-button danger-item" type="button" data-delete-tag="' + tag.id + '">刪除</button></div>'
       + descendants + '</li>';
   }).join('') + '</ul>';
 }
@@ -321,11 +286,20 @@ function renderPublisherControls() {
   document.querySelector('#publisher-suggestions').innerHTML = publishers.flatMap((publisher) =>
     publisher.aliases.map((alias) => `<option value="${escapeHtml(alias)}">${escapeHtml(publisher.canonical_name)}</option>`)
   ).join('');
-  document.querySelector('#publisher-list').innerHTML = publishers.length ? publishers.map((publisher) => `
-    <div class="publisher-row"><strong>${escapeHtml(publisher.canonical_name)}</strong>
-      <span>${publisher.aliases.map((alias) => `<span class="tag-chip">${escapeHtml(alias)}</span>`).join('')}</span>
-      <button class="danger compact" type="button" data-delete-publisher="${publisher.id}">刪除正規型</button>
-    </div>`).join('') : '<div class="empty">尚未錄入出版社。</div>';
+  const collapsed = getBooleanPreference('publishers-collapsed', true);
+  document.querySelector('#publisher-list').innerHTML = publishers.length
+    ? publishers.map((publisher) => `
+      <div class="publisher-row${collapsed ? ' is-collapsed' : ''}" data-publisher-row>
+        <button class="publisher-summary" type="button" data-publisher-toggle aria-expanded="${String(!collapsed)}">
+          <strong>${escapeHtml(publisher.canonical_name)}</strong>
+          <span>${publisher.aliases.length} 個名稱</span><b aria-hidden="true">›</b>
+        </button>
+        <div class="publisher-aliases">${publisher.aliases.map((alias) =>
+          `<span class="tag-chip">${escapeHtml(alias)}</span>`).join('')}</div>
+        <button class="quiet-button danger-item publisher-delete" type="button"
+          data-delete-publisher="${publisher.id}">刪除正規型</button>
+      </div>`).join('')
+    : '<div class="empty">尚未建立出版社正規型。</div>';
 }
 
 function tagChips(items) {
@@ -337,48 +311,38 @@ function groupAnchor(index) {
 }
 
 function editionTopDisplay(entry) {
-  const related = entry.related_works;
-  const fallbackTitle = related.length === 1
-    ? related[0].title
-    : related.map((work) => work.title).join(' · ');
-  const fallbackSubtitle = related.length === 1 ? related[0].subtitle : '';
+  const metadata = entry.effective_metadata || {};
   return {
-    title: entry.edition.title || entry.edition.translated_title || fallbackTitle || '版本資料',
-    subtitle: entry.edition.subtitle
-      || entry.edition.translated_subtitle
-      || fallbackSubtitle
-      || ''
+    title: metadata.title?.value || '版本資料',
+    subtitle: metadata.subtitle?.value || ''
   };
 }
 
 function buildEditionEntries(records) {
   const byId = new Map();
   for (const record of records) {
-    const editionId = Number(record.edition_id || record.edition?.id || 0);
-    const key = editionId || JSON.stringify([
-      record.edition.identifier, record.edition.title, record.edition.publisher,
-      record.edition.publication_year, record.edition.version
-    ]);
-    if (!byId.has(key)) {
-      byId.set(key, {
+    const editionId = Number(record.edition_id || 0);
+    if (!byId.has(editionId)) {
+      byId.set(editionId, {
         kind: 'edition',
         id: editionId,
         edition: record.edition,
+        effective_metadata: record.edition_effective_metadata || {},
+        volumesById: new Map(),
         copies: [],
         copyIds: new Set()
       });
     }
-    const entry = byId.get(key);
+    const entry = byId.get(editionId);
+    const volumeId = Number(record.volume_id);
+    if (!entry.volumesById.has(volumeId)) {
+      entry.volumesById.set(volumeId, {...record.volume, copies: []});
+    }
     if (!entry.copyIds.has(record.id)) {
       entry.copyIds.add(record.id);
-      entry.copies.push({
-        id: record.id,
-        volume_number: record.copy.volume_number,
-        volume_title: record.copy.volume_title,
-        identifier: record.copy.identifier,
-        effective_identifier: record.copy.effective_identifier,
-        location: record.copy.location
-      });
+      const copy = {id: record.id, volume_id: volumeId, ...record.copy};
+      entry.copies.push(copy);
+      entry.volumesById.get(volumeId).copies.push(copy);
     }
   }
   return [...byId.values()].map((entry) => {
@@ -390,12 +354,13 @@ function buildEditionEntries(records) {
     for (const work of relatedWorks) {
       for (const tag of work.tags || []) tagsById.set(tag.id, tag);
     }
-    const scripts = entry.edition.edition_scripts
-      ? splitTerms(entry.edition.edition_scripts)
-      : [...new Set(relatedWorks.flatMap((work) => splitTerms(work.scripts)))];
-    const display = editionTopDisplay({...entry, related_works: relatedWorks});
+    const display = editionTopDisplay(entry);
+    const scripts = splitTerms(entry.effective_metadata.scripts?.value);
+    const volumes = [...entry.volumesById.values()];
+    delete entry.volumesById;
     return {
       ...entry,
+      volumes,
       relations,
       related_works: relatedWorks,
       title: display.title,
@@ -410,6 +375,7 @@ function buildEditionEntries(records) {
     };
   }).sort((left, right) => left.title.localeCompare(right.title, 'zh-Hant', {numeric: true}));
 }
+
 
 function smartTopEntries() {
   const collapsedEditions = editionEntries.filter((entry) =>
@@ -470,38 +436,50 @@ function entryGroupingValues(entry, dimension) {
 function renderWorks(query) {
   const dimension = viewSelect.value;
   const items = topEntries();
+  const collapseControls = document.querySelector('#group-collapse-controls');
   collectionLayout.classList.toggle('has-index', dimension !== 'all' && items.length > 0);
   const modeName = topModeSelect.value === 'smart'
     ? '智能條目' : (topModeSelect.value === 'edition' ? 'Edition' : 'Work');
   count.textContent = query
-    ? items.length + ' 項' + modeName + '搜尋結果'
-    : '共 ' + items.length + ' 項' + modeName + ' · ' + books.length + ' 冊實物書';
+    ? items.length + ' 個' + modeName + '符合搜尋'
+    : '共 ' + items.length + ' 個' + modeName + ' · ' + books.length + '  份實物副本';
   if (!items.length) {
     groupIndex.hidden = true;
-    list.innerHTML = query ? '<div class="empty"><strong>沒有找到相符藏書</strong>試試較短的關鍵詞，或搜尋其他字段。</div>' : '<div class="empty"><strong>書架還是空的</strong>按右上角「新增藏書」，記下你的第一冊書。</div>';
+    collapseControls.hidden = true;
+    list.innerHTML = query
+      ? '<div class="empty"><strong>沒有找到相符藏書</strong><span>可以改用題名、責任人、識別號或位置搜尋。</span></div>'
+      : '<div class="empty"><strong>書架目前是空的</strong><span>從右上角「新增藏書」建立第一筆館藏。</span></div>';
     return;
   }
   if (dimension === 'all') {
     groupIndex.hidden = true;
+    collapseControls.hidden = true;
     list.innerHTML = renderTopRows(items);
     return;
   }
   const groups = new Map();
   for (const entry of items) {
     let values = entryGroupingValues(entry, dimension);
-    if (!values.length) values = ['未記錄'];
+    if (!values.length) values = ['未標'];
     for (const value of new Set(values)) {
       if (!groups.has(value)) groups.set(value, []);
       groups.get(value).push(entry);
     }
   }
-  const entries = [...groups.entries()].sort(([a], [b]) => a.localeCompare(b, 'zh-Hant', {numeric: true}));
+  const entries = [...groups.entries()].sort(([a], [b]) =>
+    a.localeCompare(b, 'zh-Hant', {numeric: true})
+  );
+  const collapsed = getBooleanPreference('groups-collapsed', false);
   groupIndex.hidden = false;
-  groupIndex.innerHTML = entries.map(([label], index) => '<a href="#' + groupAnchor(index) + '">' + escapeHtml(label) + '</a>').join('');
+  collapseControls.hidden = false;
+  groupIndex.innerHTML = entries.map(([label], index) =>
+    '<a href="#' + groupAnchor(index) + '">' + escapeHtml(label) + '</a>'
+  ).join('');
   list.innerHTML = entries.map(([label, groupedItems], index) =>
-    '<section class="view-group" id="' + groupAnchor(index) + '"><h3>'
-      + escapeHtml(label) + '<small>' + groupedItems.length + ' 項</small></h3>'
-      + renderTopRows(groupedItems) + '</section>'
+    '<section class="view-group' + (collapsed ? ' is-collapsed' : '') + '" id="' + groupAnchor(index) + '">'
+      + '<button class="group-heading" type="button" data-group-toggle aria-expanded="' + String(!collapsed) + '">'
+      + '<strong>' + escapeHtml(label) + '</strong><span>' + groupedItems.length + ' 項</span></button>'
+      + '<div class="group-contents">' + renderTopRows(groupedItems) + '</div></section>'
   ).join('');
 }
 
@@ -517,7 +495,7 @@ function renderWorkRow(work) {
       <span class="work-title"><strong>${escapeHtml(work.title)}</strong>${work.subtitle ? `<small>${escapeHtml(work.subtitle)}</small>` : ''}${tagChips(work.tags)}</span>
       <span class="cell"><span class="cell-label">作者或相關責任人</span>${shown(work.authors)}</span>
       <span class="cell stat"><b>${work.edition_count}</b><small>版本</small></span>
-      <span class="cell stat"><b>${work.copy_count}</b><small>實物冊</small></span>
+      <span class="cell stat"><b>${work.copy_count}</b><small>實物副本</small></span>
       <span class="arrow">›</span>
     </button>`;
 }
@@ -538,14 +516,9 @@ function renderEditionTopRow(entry) {
       <span class="work-title"><small class="top-kind">EDITION</small><strong>${escapeHtml(entry.title)}</strong>${entry.subtitle ? `<small>${escapeHtml(entry.subtitle)}</small>` : ''}${tagChips(entry.tags)}</span>
       <span class="cell"><span class="cell-label">關聯作品</span>${shown(relatedTitles)}</span>
       <span class="cell stat structure-stat"><b>${escapeHtml(editionStructureLabel(entry))}</b><small>結構</small></span>
-      <span class="cell stat"><b>${entry.copy_count}</b><small>實物冊</small></span>
+      <span class="cell stat"><b>${entry.copy_count}</b><small>實物副本</small></span>
       <span class="arrow">›</span>
     </button>`;
-}
-
-function splitTerms(value) {
-  return String(value ?? '').replace(/[；、，]/g, ';')
-    .split(';').map((item) => item.trim()).filter(Boolean);
 }
 
 function createRepeatableRow(container, value = '') {
@@ -695,14 +668,10 @@ function pairedTitleItems(titles, subtitles) {
   })).filter((pair) => pair.title || pair.subtitle);
 }
 
-function editionDisplayData(edition) {
-  const work = activeWork?.work;
+function editionDisplayData(effectiveMetadata = {}) {
   return {
-    title: edition.title || edition.translated_title || work?.title || '版本資料',
-    subtitle: edition.subtitle
-      || edition.translated_subtitle
-      || work?.subtitle
-      || ''
+    title: effectiveMetadata.title?.value || '\u7248\u672c\u8cc7\u6599',
+    subtitle: effectiveMetadata.subtitle?.value || ''
   };
 }
 
@@ -721,34 +690,18 @@ function hasVisibleEditionDetails(edition) {
   ) || editionRelations(edition).length > 1;
 }
 
-function effectiveEditionScripts(edition) {
-  return edition.edition_scripts || activeWork?.work.scripts || '';
+function effectiveEditionScripts(effectiveMetadata = {}) {
+  return effectiveMetadata.scripts?.value || '';
 }
 
-function editionRelations(edition) {
-  if (Array.isArray(edition.work_relations) && edition.work_relations.length) {
-    return edition.work_relations.map((relation) => ({
-      work_id: Number(relation.work_id),
-      relation_type: relation.relation_type === 'volume' ? 'volume' : 'contained',
-      volume_number: relation.relation_type === 'volume' ? (relation.volume_number || '') : ''
-    }));
-  }
-  return (edition.work_ids || []).map((workId) => ({
-    work_id: Number(workId), relation_type: 'contained', volume_number: ''
-  }));
-}
 
-function relationVolumeDisplay(value) {
-  const text = String(value || '').trim();
-  return /^\d+(?:\.\d+)*$/.test(text) ? ('第 ' + text + ' 冊') : text;
-}
 
 function editionHoldingLabel(group) {
   const relations = editionRelations(group.edition);
   const volumeCount = relations.filter((relation) => relation.relation_type === 'volume').length;
   const containedCount = relations.filter((relation) => relation.relation_type === 'contained').length;
-  const copyCount = group.copies.length;
-  if (volumeCount && !containedCount) return volumeCount + ' 分冊 · ' + copyCount + ' 實物冊';
+  const copyCount = groupCopies(group).length;
+  if (volumeCount && !containedCount) return volumeCount + ' 分冊 · ' + copyCount + ' 實物副本';
   if (containedCount > 1 && !volumeCount) return copyCount + ' 冊 · 內含 ' + containedCount + ' 部';
   if (volumeCount || containedCount > 1) {
     return copyCount + ' 冊'
@@ -760,10 +713,10 @@ function editionHoldingLabel(group) {
 
 function editionHeader(group, options = {}) {
   const edition = group.edition;
-  const display = options.display || editionDisplayData(edition);
+  const display = options.display || editionDisplayData(group.effective_metadata);
   const publisher = publisherDisplay(edition);
-  const publication = [publisher === '—' ? '' : publisher, edition.publication_year || ''].filter(Boolean).join(' · ');
-  const scripts = splitTerms(effectiveEditionScripts(edition)).join(' · ');
+  const publication = [publisher, edition.publication_year || ''].filter(Boolean).join(' · ');
+  const scripts = splitTerms(effectiveEditionScripts(group.effective_metadata)).join(' \u00b7 ');
   const versions = splitTerms(edition.version);
   const identifiers = splitTerms(edition.identifier);
   return '<span class="edition-summary">'
@@ -785,93 +738,109 @@ function publisherDisplay(edition) {
   return shown(edition.publisher_canonical || edition.publisher);
 }
 
-function naturalVolumeCompare(left, right) {
-  const numeric = (value) => /^\d+(?:\.\d+)*$/.test(value) ? value.split('.').map(Number) : null;
-  const a = numeric(left);
-  const b = numeric(right);
-  if (a && b) {
-    const size = Math.max(a.length, b.length);
-    for (let index = 0; index < size; index += 1) {
-      const difference = (a[index] ?? -1) - (b[index] ?? -1);
-      if (difference) return difference;
-    }
-    return 0;
-  }
-  if (a) return -1;
-  if (b) return 1;
-  return left.localeCompare(right, 'zh-Hant', {numeric: true});
-}
 
-function groupedVolumes(group) {
-  const volumes = new Map();
-  for (const copy of group.copies) {
-    const volumeNumber = copy.volume_number || '';
-    const volumeTitle = copy.volume_title || '';
-    const key = JSON.stringify([volumeNumber, volumeTitle]);
-    if (!volumes.has(key)) volumes.set(key, {
-      volume_number: volumeNumber, volume_title: volumeTitle, copies: []
-    });
-    volumes.get(key).copies.push(copy);
-  }
-  return [...volumes.values()].sort((left, right) =>
-    naturalVolumeCompare(left.volume_number, right.volume_number)
-      || left.volume_title.localeCompare(right.volume_title, 'zh-Hant', {numeric: true})
-  );
-}
 
-function volumeName(volume, fallback = '未標卷冊') {
+function volumeName(volume, fallback = '單冊') {
   const parts = [volume.volume_number, volume.volume_title].filter(Boolean);
   return parts.length ? parts.map(escapeHtml).join(' · ') : fallback;
 }
 
+function workMenu(workId) {
+  return actionMenu('work', workId, [
+    {action: 'edit-work', label: '修改作品'},
+    {action: 'add-edition', label: '新增版本'},
+    {action: 'delete-work', label: '刪除作品', danger: true}
+  ]);
+}
+
+function editionMenu(group) {
+  const volumes = groupedVolumes(group);
+  const implicit = volumes.length === 1
+    && !volumes[0].volume_number && !volumes[0].volume_title;
+  const items = [
+    {action: 'edit-edition', label: '修改版本'},
+    {action: 'add-volume', label: '新增冊'}
+  ];
+  if (implicit) {
+    items.push({
+      action: 'add-copy', label: '新增實物副本',
+      volumeId: volumes[0].id
+    });
+  }
+  items.push({action: 'delete-edition', label: '刪除版本', danger: true});
+  const htmlItems = items.map((item) => ({
+    ...item,
+    action: item.volumeId ? 'add-copy-' + item.volumeId : item.action
+  }));
+  return actionMenu('edition', group.id, htmlItems);
+}
+
+function volumeMenu(volume) {
+  return actionMenu('volume', volume.id, [
+    {action: 'edit-volume', label: '修改冊資料'},
+    {action: 'add-copy', label: '新增實物副本'},
+    {action: 'delete-volume', label: '刪除冊', danger: true}
+  ]);
+}
+
+function copyMenu(copy) {
+  return actionMenu('copy', copy.id, [
+    {action: 'edit-copy', label: '修改館藏資料'},
+    {action: 'delete-copy', label: '刪除副本', danger: true}
+  ]);
+}
+
 function copyRows(copies) {
   return copies.map((copy) => `
-    <button class="copy-row" type="button" data-copy-id="${copy.id}">
-      <span><small>實物冊</small><strong>#${copy.id}</strong></span>
-      <span><small>藏書位置</small>${shown(copy.location)}</span><span class="arrow">›</span>
-    </button>`).join('');
+    <div class="copy-item">
+      <button class="copy-open" type="button" data-copy-id="${copy.id}">
+        <span><small>實物副本</small><strong>#${copy.id}</strong></span>
+        <span><small>藏書位置</small>${shown(copy.location)}</span>
+        <span class="copy-reading">${copy.reading_record ? escapeHtml(copy.reading_record) : ''}</span>
+      </button>
+      ${copyMenu(copy)}
+    </div>`).join('');
+}
+
+function volumeOverrideSummary(volume) {
+  const metadata = [];
+  if (volume.version) metadata.push(escapeHtml(volume.version));
+  if (volume.publication_year) metadata.push(escapeHtml(volume.publication_year));
+  if (volume.responsibility) {
+    const effective = volume.effective_metadata?.responsibility?.value;
+    metadata.push(escapeHtml(effective || volume.responsibility));
+  }
+  const identifiers = splitTerms(volume.identifier);
+  return {
+    metadata: metadata.join(' · '),
+    identifiers: identifiers.map(escapeHtml).join('<br>')
+  };
 }
 
 function renderVolumeContent(group) {
   const volumes = groupedVolumes(group);
-  if (volumes.length === 1) {
-    const volume = volumes[0];
-    const copies = volume.copies;
-    const hasVolume = volume.volume_number || volume.volume_title;
-    if (!hasVolume && copies.length === 1) {
-      const copy = copies[0];
-      return `<button class="location-single" type="button" data-copy-id="${copy.id}">
-        <span><small>藏書位置</small>${shown(copy.location)}</span><span class="arrow">›</span>
-      </button>`;
-    }
-    if (!hasVolume) return `<div class="copy-list">${copyRows(copies)}</div>`;
-    const label = volumeName(volume);
-    if (copies.length === 1) {
-      const copy = copies[0];
-      return `<button class="volume-single merged-volume" type="button" data-copy-id="${copy.id}">
-        <span><small>卷冊</small><strong>${label}</strong></span>
-        <span><small>藏書位置</small>${shown(copy.location)}</span><span class="arrow">›</span>
-      </button>`;
-    }
-    return `<div class="single-volume-group">
-      <div class="single-volume-label"><span><small>卷冊</small><strong>${label}</strong></span><span>${copies.length} 冊重複實物冊</span></div>
-      <div class="copy-list">${copyRows(copies)}</div>
-    </div>`;
+  if (!volumes.length) {
+    return '<div class="empty compact-empty">此版本尚未建立冊。</div>';
   }
   return volumes.map((volume) => {
-    const copies = volume.copies;
-    const label = volumeName(volume);
-    if (copies.length === 1) {
-      const copy = copies[0];
-      return `<button class="volume-single" type="button" data-copy-id="${copy.id}">
-        <span><small>卷冊</small><strong>${label}</strong></span>
-        <span><small>藏書位置</small>${shown(copy.location)}</span><span class="arrow">›</span>
-      </button>`;
+    const copies = volume.copies || [];
+    const overrides = volumeOverrideSummary(volume);
+    const implicit = volumes.length === 1
+      && !volume.volume_number && !volume.volume_title
+      && !volume.identifier && !volume.version
+      && !volume.publication_year && !volume.responsibility;
+    if (implicit && copies.length === 1) {
+      return '<div class="implicit-volume">' + copyRows(copies) + volumeMenu(volume) + '</div>';
     }
-    return `<details class="volume-duplicates">
-      <summary><span><small>卷冊</small><strong>${label}</strong></span><span>${copies.length} 冊重複實物冊</span><span class="disclosure">⌄</span></summary>
-      <div class="copy-list">${copyRows(copies)}</div>
-    </details>`;
+    const title = volumeName(volume, volumes.length === 1 ? '單冊' : '未標冊號');
+    return '<section class="volume-card" data-volume-id="' + volume.id + '">'
+      + '<div class="volume-summary"><strong>' + title + '</strong>'
+      + '<span class="volume-meta">' + (copies.length + ' 份副本') + '</span>'
+      + (overrides.metadata ? '<span class="volume-meta">' + overrides.metadata + '</span>' : '')
+      + (overrides.identifiers ? '<span class="volume-identifiers">' + overrides.identifiers + '</span>' : '')
+      + '</div>' + volumeMenu(volume)
+      + '<div class="copy-list">' + (copies.length ? copyRows(copies)
+        : '<div class="empty compact-empty">尚無實物副本</div>') + '</div></section>';
   }).join('');
 }
 
@@ -891,77 +860,53 @@ function renderEditionBody(group) {
     ...relation,
     work: workOptions.find((work) => work.id === relation.work_id)
   }));
-  const relationGroups = [
-    ['volume', '分冊作品'],
-    ['contained', '本冊收錄']
-  ];
-  for (const [type, label] of relationGroups) {
+  for (const [type, label] of [['volume', '分冊作品'], ['contained', '本冊收錄']]) {
     const members = relations.filter((relation) => relation.relation_type === type);
     if (!members.length || (relations.length === 1 && type === 'contained')) continue;
-    details.push('<div class="edition-detail-item title-pair-detail"><small>' + label
-      + (type === 'volume' ? '（' + members.length + ' 冊）' : '（' + members.length + ' 部）') + '</small>'
+    details.push('<div class="edition-detail-item title-pair-detail"><small>' + label + '</small>'
       + '<ol class="edition-related-works relation-' + type + '">' + members.map((relation) => {
         const work = relation.work;
-        const title = work?.title || ('Work #' + relation.work_id);
-        const author = work?.authors || '';
-        return '<li>'
-          + (type === 'volume' && relation.volume_number
-            ? '<span class="relation-volume-number">' + escapeHtml(relationVolumeDisplay(relation.volume_number)) + '</span>' : '')
-          + '<strong>' + escapeHtml(title) + '</strong>'
-          + (author ? '<span>' + escapeHtml(author) + '</span>' : '') + '</li>';
+        return '<li><strong>' + escapeHtml(work?.title || ('Work #' + relation.work_id)) + '</strong>'
+          + (work?.authors ? '<span>' + escapeHtml(work.authors) + '</span>' : '') + '</li>';
       }).join('') + '</ol></div>');
   }
   if (edition.series) details.push('<div class="edition-detail-item"><small>系列</small><span>' + escapeHtml(edition.series) + '</span></div>');
   if (edition.translator) details.push('<div class="edition-detail-item"><small>譯者或相關責任人</small><span>' + escapeHtml(edition.translator) + '</span></div>');
+  if (edition.edition_scripts) details.push('<div class="edition-detail-item"><small>文種</small><span>' + escapeHtml(edition.edition_scripts) + '</span></div>');
   const otherTitles = renderPairedTitleDetail('其他題名', pairedTitleItems(edition.other_title, edition.other_subtitle));
   if (otherTitles) details.push(otherTitles);
   const translated = renderPairedTitleDetail('翻譯題名', pairedTitleItems(edition.translated_title, edition.translated_subtitle));
   if (translated) details.push(translated);
-  const metadata = details.length ? '<div class="edition-detail-grid">' + details.join('') + '</div>' : '';
+  const metadata = details.length
+    ? '<div class="edition-detail-grid">' + details.join('') + '</div>' : '';
   return '<div class="edition-body">' + metadata
-    + '<div class="volume-list">' + renderVolumeContent(group) + '</div>'
-    + '<div class="edition-actions"><button class="text-button" type="button" data-edit-edition="' + group.id + '">修改此版本</button>'
-    + '<button class="text-button" type="button" data-add-edition-copy="' + group.id + '">＋ 新增此版本的實物冊</button>'
-    + '<button class="text-button danger-text" type="button" data-delete-edition="' + group.id + '">刪除此版本</button></div></div>';
+    + '<div class="volume-list">' + renderVolumeContent(group) + '</div></div>';
 }
 
-function setWorkLevelActionsVisible(visible) {
-  document.querySelector('#delete-work-button').hidden = !visible;
-  document.querySelector('#edit-work-button').hidden = !visible;
-  document.querySelector('#add-work-copy-button').hidden = !visible;
-}
 
 function renderWorkDetail(work) {
-  setWorkLevelActionsVisible(true);
   document.querySelector('#detail-title').textContent = work.work.title;
-  const author = work.work.authors ? '<p class="work-detail-author">' + escapeHtml(work.work.authors) + '</p>' : '';
-  const subtitle = work.work.subtitle ? '<p class="work-detail-subtitle">' + escapeHtml(work.work.subtitle) + '</p>' : '';
-  const scripts = work.work.scripts ? '<p class="work-detail-scripts"><small>文種</small>' + escapeHtml(work.work.scripts) + '</p>' : '';
+  const author = work.work.authors
+    ? '<p class="work-detail-author">' + escapeHtml(work.work.authors) + '</p>' : '';
+  const subtitle = work.work.subtitle
+    ? '<p class="work-detail-subtitle">' + escapeHtml(work.work.subtitle) + '</p>' : '';
+  const scripts = work.work.scripts
+    ? '<p class="work-detail-scripts"><small>文種</small>' + escapeHtml(work.work.scripts) + '</p>' : '';
   const assignedTags = tags.filter((tag) => work.work.tag_ids.includes(tag.id));
-  let editions;
-  if (work.editions.length === 1) {
-    const group = work.editions[0];
-    const volumes = groupedVolumes(group);
-    const fullyCollapsed = !hasVisibleEditionDetails(group.edition)
-      && volumes.length === 1 && !volumes[0].volume_number && !volumes[0].volume_title
-      && volumes[0].copies.length === 1;
-    if (fullyCollapsed) {
-      const copy = volumes[0].copies[0];
-      editions = '<section class="collapsed-book"><button class="collapsed-book-row" type="button" data-copy-id="' + copy.id + '">'
-        + editionHeader(group) + '<span><small>藏書位置</small>' + shown(copy.location) + '</span><span class="arrow">›</span></button>'
-        + '<div class="collapsed-actions"><button class="text-button" type="button" data-edit-edition="' + group.id + '">修改版本資料</button>'
-        + '<button class="text-button" type="button" data-add-edition-copy="' + group.id + '">＋ 新增實物冊</button>'
-        + '<button class="text-button danger-text" type="button" data-delete-edition="' + group.id + '">刪除此版本</button></div></section>';
-    } else {
-      editions = '<section class="merged-edition"><div class="merged-edition-header">' + editionHeader(group) + '</div>' + renderEditionBody(group) + '</section>';
-    }
-  } else {
-    editions = work.editions.map((group) => '<details class="edition-card"><summary>' + editionHeader(group, {disclosure: true}) + '</summary>' + renderEditionBody(group) + '</details>').join('');
-  }
+  const editions = work.editions.map((group) => {
+    const content = editionHeader(group)
+      + editionMenu(group);
+    return '<section class="' + (work.editions.length === 1 ? 'merged-edition' : 'edition-card')
+      + '"><div class="merged-edition-header">' + content
+      + '</div>' + renderEditionBody(group) + '</section>';
+  }).join('');
   document.querySelector('#detail-content').innerHTML =
-    '<section class="work-overview">' + subtitle + author + scripts + tagChips(assignedTags)
-    + '<p>' + work.editions.length + ' 個版本 · ' + work.editions.reduce((sum, item) => sum + item.copies.length, 0) + ' 冊</p></section>'
-    + '<section class="edition-list">' + (editions || '<div class="empty">此作品還沒有版本。</div>') + '</section>';
+    '<section class="work-overview">' + workMenu(work.id)
+    + subtitle + author + scripts + tagChips(assignedTags)
+    + '<p>' + work.editions.length + ' 個版本 · '
+    + work.editions.reduce((sum, item) => sum + groupCopies(item).length, 0) + ' 份實物副本</p></section>'
+    + '<section class="edition-list">'
+    + (editions || '<div class="empty">此作品尚無版本。</div>') + '</section>';
 }
 
 function renderEditionTopDetail() {
@@ -972,15 +917,14 @@ function renderEditionTopDetail() {
     return;
   }
   activeWork = {...activeWork, editions: [group]};
-  setWorkLevelActionsVisible(false);
   const display = editionTopDisplay(entry);
   document.querySelector('#detail-title').textContent = display.title;
   document.querySelector('#detail-content').innerHTML =
     '<section class="edition-top-overview"><p class="eyebrow">EDITION VIEW</p>'
     + '<p>' + escapeHtml(editionStructureLabel(entry)) + ' · '
-    + group.copies.length + ' 冊實物書</p></section>'
+    + groupCopies(group).length + '  份實物副本</p></section>'
     + '<section class="edition-list"><section class="merged-edition">'
-    + '<div class="merged-edition-header">' + editionHeader(group, {display}) + '</div>'
+    + '<div class="merged-edition-header">' + editionHeader(group, {display}) + editionMenu(group) + '</div>'
     + renderEditionBody(group) + '</section></section>';
 }
 
@@ -1035,37 +979,28 @@ function pairs(items, omitEmpty = false) {
 
 async function openCopy(copyId) {
   try {
-    activeBook = await request('/api/books/' + copyId);
-    document.querySelector('#copy-detail-title').textContent = activeBook.work.title + ' · #' + activeBook.id;
+    activeCopy = await request('/api/copies/' + copyId);
+    const groups = activeWork?.editions || [];
+    const group = groups.find((item) =>
+      groupedVolumes(item).some((volume) => volume.id === activeCopy.volume_id)
+    );
+    activeVolume = group
+      ? groupedVolumes(group).find((volume) => volume.id === activeCopy.volume_id)
+      : null;
+    const editionTitle = group
+      ? editionDisplayData(group.effective_metadata).title : 'Edition';
+    const volumeTitle = activeVolume ? volumeName(activeVolume, '單冊') : 'Volume';
+    document.querySelector('#copy-detail-title').textContent = '實物副本 #' + activeCopy.id;
     document.querySelector('#copy-detail-content').innerHTML =
-      '<section class="detail-section"><h3>01 · 作品信息</h3>' + pairs([
-        ['標題', activeBook.work.title, true], ['副標題', activeBook.work.subtitle, true],
-        ['作者或相關責任人', activeBook.work.authors, true], ['文種', activeBook.work.scripts, true]
-      ]) + '</section>'
-      + '<section class="detail-section"><h3>02 · 版本信息</h3>' + pairs([
-        ['版本題名', activeBook.edition.title, true],
-        ['版本副標題', activeBook.edition.subtitle, true],
-        ['版本', activeBook.edition.version], ['系列', activeBook.edition.series],
-        ['出版社原始名稱', activeBook.edition.publisher], ['出版社實體', activeBook.edition.publisher_canonical],
-        ['出版年份', activeBook.edition.publication_year],
-        ['識別號', activeBook.edition.identifier, true, true],
-        ['文種', activeBook.edition.edition_scripts || activeBook.work.scripts],
-        ['其他標題', titlePairsText(activeBook.edition.other_title, activeBook.edition.other_subtitle), true],
-        ['翻譯標題', activeBook.edition.translated_title, true],
-        ['翻譯副標題', activeBook.edition.translated_subtitle, true],
-        ['譯者或相關責任人', activeBook.edition.translator, true]
-      ], true) + '</section>'
-      + '<section class="detail-section"><h3>03 · 實物冊 #' + activeBook.id + '</h3>' + pairs([
-        ['卷冊編號', activeBook.copy.volume_number],
-        ['卷冊題名', activeBook.copy.volume_title, true],
-        [
-          activeBook.copy.identifier ? '卷冊識別號' : '識別號（繼承 Edition）',
-          activeBook.copy.effective_identifier,
-          true, true
-        ],
-        ['取得日期', activeBook.copy.acquisition_date],
-        ['藏書位置', activeBook.copy.location], ['閱讀記錄', activeBook.copy.reading_record, true]
-      ]) + '</section>';
+      '<section class="copy-detail-card">' + copyMenu(activeCopy)
+      + '<p class="breadcrumb">' + escapeHtml(activeWork?.work?.title || '')
+      + ' › ' + escapeHtml(editionTitle) + ' › ' + volumeTitle + '</p>'
+      + '<h3>館藏資料</h3><dl class="copy-detail-list">'
+      + '<div><dt>編號</dt><dd>#' + activeCopy.id + '</dd></div>'
+      + (activeCopy.location ? '<div><dt>藏書位置</dt><dd>' + escapeHtml(activeCopy.location) + '</dd></div>' : '')
+      + (activeCopy.acquisition_date ? '<div><dt>取得日期</dt><dd>' + escapeHtml(activeCopy.acquisition_date) + '</dd></div>' : '')
+      + (activeCopy.reading_record ? '<div><dt>閱讀記錄</dt><dd>' + escapeHtml(activeCopy.reading_record) + '</dd></div>' : '')
+      + '</dl></section>';
     copyDialog.showModal();
   } catch (error) {
     flash(error.message, 'error');
@@ -1094,7 +1029,7 @@ function batchVolumeData() {
   const start = Number(form.elements.namedItem('batch.start').value);
   const end = Number(form.elements.namedItem('batch.end').value);
   if (!Number.isInteger(start) || !Number.isInteger(end) || start < 1 || end < start) {
-    throw new Error('批量新增請填寫有效的起始與結束卷冊，或提供自訂卷冊編號。');
+    throw new Error('批量新增請填寫有效的起始與結束冊號，或提供自訂冊號。');
   }
   if (end - start + 1 > 500) throw new Error('一次最多批量新增 500 冊。');
   return {
@@ -1105,8 +1040,11 @@ function batchVolumeData() {
 
 function updateCopyMode() {
   const batch = form.elements.namedItem('copy-mode').value === 'batch';
-  form.querySelector('[data-single-volume]').hidden = batch;
+  form.querySelectorAll('[data-single-volume]').forEach((field) => {
+    field.hidden = batch;
+  });
   form.querySelector('[data-batch-fields]').hidden = !batch;
+  updateDisclosureCounts(form);
 }
 
 enhanceRepeatable(form, 'edition.identifier', '添加識別號');
@@ -1127,21 +1065,36 @@ function updateEditionWorkWarning(editor) {
   editor.querySelector('.edition-work-warning').hidden = containedCount < 2;
 }
 
+function volumeOptionsForEdition(editionId, selectedId = null, automatic = false) {
+  const source = editionEntries.find((item) => item.id === Number(editionId))
+    || activeWork?.editions?.find((item) => item.id === Number(editionId));
+  const volumes = source ? groupedVolumes(source) : [];
+  const first = automatic
+    ? '<option value="">保存時按排列綁定新建冊</option>'
+    : '<option value="">選擇冊</option>';
+  return first + volumes.map((volume) =>
+    '<option value="' + volume.id + '"'
+      + (Number(selectedId) === Number(volume.id) ? ' selected' : '') + '>'
+      + volumeName(volume, '單冊') + '</option>'
+  ).join('');
+}
+
 function updateEditionRelationRow(row, clear = false) {
   const type = row.querySelector('[data-relation-type]').value;
-  const input = row.querySelector('[data-relation-volume]');
+  const select = row.querySelector('[data-relation-volume]');
   const isVolume = type === 'volume';
-  input.hidden = !isVolume;
-  input.disabled = !isVolume;
-  if (!isVolume && clear) input.value = '';
+  select.hidden = !isVolume;
+  select.disabled = !isVolume;
+  if (!isVolume && clear) select.value = '';
 }
 
 function createEditionWorkRow(editor, relation, fixed = false) {
   const normalized = typeof relation === 'object'
     ? relation
-    : {work_id: Number(relation), relation_type: 'contained', volume_number: ''};
+    : {work_id: Number(relation), relation_type: 'contained', volume_id: null};
   const workId = Number(normalized.work_id);
   const relationType = normalized.relation_type === 'volume' ? 'volume' : 'contained';
+  const editionId = Number(editor.dataset.editionId || 0);
   const row = document.createElement('div');
   row.className = 'edition-work-link-row';
   row.dataset.fixed = String(fixed);
@@ -1154,16 +1107,18 @@ function createEditionWorkRow(editor, relation, fixed = false) {
     + '<select class="edition-relation-type" data-relation-type aria-label="關聯類型">'
     + '<option value="contained"' + (relationType === 'contained' ? ' selected' : '') + '>同冊收錄</option>'
     + '<option value="volume"' + (relationType === 'volume' ? ' selected' : '') + '>分冊</option></select>'
-    + '<input class="edition-relation-volume" data-relation-volume aria-label="分冊號" placeholder="冊號" value="'
-    + escapeHtml(normalized.volume_number || '') + '">'
+    + '<select class="edition-relation-volume" data-relation-volume aria-label="對應冊">'
+    + volumeOptionsForEdition(editionId, normalized.volume_id, !editionId) + '</select>'
     + '<button type="button" data-work-up aria-label="上移">↑</button>'
     + '<button type="button" data-work-down aria-label="下移">↓</button>'
-    + '<button type="button" data-work-remove aria-label="移除" ' + (fixed ? 'disabled title="目前作品不能從此處移除"' : '') + '>×</button>';
+    + '<button type="button" data-work-remove aria-label="移除" '
+    + (fixed ? 'disabled title="目前作品不能從此處移除"' : '') + '>×</button>';
   editor.querySelector('.edition-work-link-rows').append(row);
   updateEditionRelationRow(row);
 }
 
-function setEditionWorkLinks(editor, relations = [], fixedPrimaryId = null) {
+function setEditionWorkLinks(editor, relations = [], fixedPrimaryId = null, editionId = null) {
+  editor.dataset.editionId = editionId ?? '';
   const rows = editor.querySelector('.edition-work-link-rows');
   rows.innerHTML = '';
   editor.querySelectorAll('[data-work-relation-search] input').forEach((input) => { input.value = ''; });
@@ -1179,7 +1134,7 @@ function setEditionWorkLinks(editor, relations = [], fixedPrimaryId = null) {
   for (const item of relations || []) {
     const relation = typeof item === 'object'
       ? {...item, work_id: Number(item.work_id)}
-      : {work_id: Number(item), relation_type: 'contained', volume_number: ''};
+      : {work_id: Number(item), relation_type: 'contained', volume_id: null};
     if (!relation.work_id) continue;
     if (positions.has(relation.work_id)) normalized[positions.get(relation.work_id)] = relation;
     else {
@@ -1189,11 +1144,11 @@ function setEditionWorkLinks(editor, relations = [], fixedPrimaryId = null) {
   }
   if (fixedPrimaryId !== null && !positions.has(Number(fixedPrimaryId))) {
     normalized.unshift({
-      work_id: Number(fixedPrimaryId), relation_type: 'contained', volume_number: ''
+      work_id: Number(fixedPrimaryId), relation_type: 'contained', volume_id: null
     });
   }
   if (fixedPrimaryId === null && !normalized.length) {
-    normalized.push({work_id: 0, relation_type: 'contained', volume_number: ''});
+    normalized.push({work_id: 0, relation_type: 'contained', volume_id: null});
   }
   normalized.forEach((relation) =>
     createEditionWorkRow(editor, relation, relation.work_id === Number(fixedPrimaryId))
@@ -1202,16 +1157,21 @@ function setEditionWorkLinks(editor, relations = [], fixedPrimaryId = null) {
 }
 
 function editionWorkRelations(editor) {
-  const relations = [...editor.querySelectorAll('.edition-work-link-row')].map((row) => {
+  const rows = [...editor.querySelectorAll('.edition-work-link-row')];
+  const relations = rows.map((row) => {
     const relationType = row.querySelector('[data-relation-type]').value;
+    const rawVolumeId = row.querySelector('[data-relation-volume]').value;
+    if (relationType === 'volume' && editor.dataset.editionId && !rawVolumeId) {
+      throw new Error('分冊關聯必須選擇此 Edition 下的冊。');
+    }
     return {
       work_id: Number(row.querySelector('.edition-work-select').value),
       relation_type: relationType,
-      volume_number: relationType === 'volume'
-        ? row.querySelector('[data-relation-volume]').value.trim() : ''
+      volume_id: relationType === 'volume' && rawVolumeId
+        ? Number(rawVolumeId) : null
     };
   }).filter((relation, index) =>
-    relation.work_id || [...editor.querySelectorAll('.edition-work-link-row')][index].dataset.implicitWork === 'true'
+    relation.work_id || rows[index].dataset.implicitWork === 'true'
   );
   const ids = relations.map((relation) => relation.work_id);
   if (new Set(ids).size !== ids.length) throw new Error('同一個 Work 不能重複關聯。');
@@ -1281,7 +1241,7 @@ function setupEditionWorkLinks() {
         createEditionWorkRow(editor, {
           work_id: Number(candidateButton.dataset.workCandidate),
           relation_type: 'contained',
-          volume_number: ''
+          volume_id: null
         });
         renderWorkRelationCandidates(editor);
         updateEditionWorkWarning(editor);
@@ -1304,8 +1264,7 @@ function setupEditionWorkLinks() {
 
 
 function editionCandidateTitle(edition) {
-  return edition.title
-    || edition.translated_title
+  return edition.effective_metadata?.title?.value
     || splitTerms(edition.identifier)[0]
     || ('Edition #' + edition.id);
 }
@@ -1334,15 +1293,15 @@ function createWorkEditionRow(editor, relation) {
   ].filter(Boolean).join(' · ');
   row.innerHTML =
     '<span class="work-edition-selected"><strong>' + escapeHtml(editionCandidateTitle(edition)) + '</strong>'
-    + (edition.subtitle || edition.translated_subtitle
-      ? '<span>' + escapeHtml(edition.subtitle || edition.translated_subtitle) + '</span>' : '')
+    + (edition.effective_metadata?.subtitle?.value
+      ? '<span>' + escapeHtml(edition.effective_metadata.subtitle.value) + '</span>' : '')
     + (publication ? '<small>' + escapeHtml(publication) + '</small>' : '')
     + (edition.identifier ? '<small>' + shownLines(edition.identifier) + '</small>' : '')
     + '</span><select data-work-edition-type aria-label="關聯類型">'
     + '<option value="contained"' + (relationType === 'contained' ? ' selected' : '') + '>同冊收錄</option>'
     + '<option value="volume"' + (relationType === 'volume' ? ' selected' : '') + '>分冊</option></select>'
-    + '<input data-work-edition-volume aria-label="分冊號" placeholder="冊號" value="'
-    + escapeHtml(relation.volume_number || '') + '">'
+    + '<select data-work-edition-volume aria-label="對應冊">'
+    + volumeOptionsForEdition(editionId, relation.volume_id) + '</select>'
     + '<button type="button" data-remove-work-edition aria-label="移除關聯">×</button>';
   editor.querySelector('.work-edition-link-rows').append(row);
   updateWorkEditionRelationRow(row);
@@ -1361,7 +1320,7 @@ function setWorkEditionLinks(editor, work = null) {
     if (relation) createWorkEditionRow(editor, {
       edition_id: group.id,
       relation_type: relation.relation_type,
-      volume_number: relation.volume_number
+      volume_id: relation.volume_id
     });
   }
 }
@@ -1399,8 +1358,8 @@ function renderEditionRelationCandidates(editor) {
     ].filter(Boolean).join(' · ');
     return '<button type="button" class="relation-candidate" data-edition-candidate="' + edition.id + '">'
       + '<strong>' + escapeHtml(editionCandidateTitle(edition)) + '</strong>'
-      + (edition.subtitle || edition.translated_subtitle
-        ? '<span>' + escapeHtml(edition.subtitle || edition.translated_subtitle) + '</span>' : '')
+      + (edition.effective_metadata?.subtitle?.value
+        ? '<span>' + escapeHtml(edition.effective_metadata.subtitle.value) + '</span>' : '')
       + (publication ? '<small>' + escapeHtml(publication) + '</small>' : '')
       + (edition.identifier ? '<small>' + escapeHtml(edition.identifier) + '</small>' : '')
       + '</button>';
@@ -1410,11 +1369,14 @@ function renderEditionRelationCandidates(editor) {
 function workEditionRelations(editor) {
   return [...editor.querySelectorAll('.work-edition-link-row')].map((row) => {
     const relationType = row.querySelector('[data-work-edition-type]').value;
+    const rawVolumeId = row.querySelector('[data-work-edition-volume]').value;
+    if (relationType === 'volume' && !rawVolumeId) {
+      throw new Error('分冊關聯必須選擇該 Edition 下的冊。');
+    }
     return {
       edition_id: Number(row.dataset.editionId),
       relation_type: relationType,
-      volume_number: relationType === 'volume'
-        ? row.querySelector('[data-work-edition-volume]').value.trim() : ''
+      volume_id: relationType === 'volume' ? Number(rawVolumeId) : null
     };
   });
 }
@@ -1442,7 +1404,7 @@ function setupWorkEditionLinks() {
       createWorkEditionRow(editor, {
         edition_id: Number(candidate.dataset.editionCandidate),
         relation_type: 'contained',
-        volume_number: ''
+        volume_id: null
       });
       renderEditionRelationCandidates(editor);
       return;
@@ -1477,6 +1439,9 @@ function openForm(
   primaryWorkId = null, existingEditionId = null
 ) {
   form.reset();
+  form.querySelectorAll('[data-disclosure]').forEach((details) => {
+    details.open = false;
+  });
   setTagPickerValues(form.querySelector('[data-tag-picker]'));
   form.elements.namedItem('copy-mode').value = 'single';
   document.querySelector('#copy-mode-controls').hidden = Boolean(book);
@@ -1486,14 +1451,18 @@ function openForm(
   setTitlePairs(form.querySelector('[data-paired-titles]'));
   setEditionWorkLinks(
     form.querySelector('[data-edition-work-links]'),
-    book?.edition.work_relations ?? presetEdition?.work_relations ?? book?.edition.work_ids ?? presetEdition?.work_ids ?? [],
-    book ? (book.edition.work_ids?.[0] ?? primaryWorkId) : primaryWorkId
+    book?.edition.work_relations ?? presetEdition?.work_relations
+      ?? book?.edition.work_ids ?? presetEdition?.work_ids ?? [],
+    book ? (book.edition.work_ids?.[0] ?? primaryWorkId) : primaryWorkId,
+    existingEditionId ?? book?.edition_id ?? null
   );
   document.querySelector('#copy-id').value = book?.id ?? '';
   document.querySelector('#existing-edition-id').value =
     existingEditionId ?? book?.edition_id ?? '';
-  document.querySelector('#form-mode').textContent = book ? '修改實物冊' : '新增實物冊';
-  document.querySelector('#form-title').textContent = book ? '修改藏書' : '新增藏書';
+  document.querySelector('#form-mode').textContent =
+    book ? '修改館藏' : '新增實物副本';
+  document.querySelector('#form-title').textContent =
+    book ? '修改藏書' : '新增藏書';
   saveButton.textContent = book ? '保存修改' : '保存藏書';
   const sourceWork = book?.work ?? presetWork;
   const sourceEdition = book?.edition ?? presetEdition;
@@ -1501,7 +1470,10 @@ function openForm(
     for (const [key, value] of Object.entries(sourceWork)) {
       if (key !== 'tag_ids' && key !== 'tag_names') setField(`work.${key}`, value);
     }
-    setTagPickerValues(form.querySelector('[data-tag-picker]'), sourceWork.tag_ids ?? [], sourceWork.tag_names ?? []);
+    setTagPickerValues(
+      form.querySelector('[data-tag-picker]'),
+      sourceWork.tag_ids ?? [], sourceWork.tag_names ?? []
+    );
   }
   if (sourceEdition) {
     for (const [key, value] of Object.entries(sourceEdition)) {
@@ -1513,13 +1485,26 @@ function openForm(
     setRepeatable(form, 'edition.version', sourceEdition.version);
     setTitlePairs(
       form.querySelector('[data-paired-titles]'),
-      sourceEdition.other_title,
-      sourceEdition.other_subtitle
+      sourceEdition.other_title, sourceEdition.other_subtitle
     );
   }
-  if (book) {
-    for (const [key, value] of Object.entries(book.copy)) setField(`copy.${key}`, value);
+  if (book?.volume) {
+    setField('volume.volume_number', book.volume.volume_number);
+    setField('volume.volume_title', book.volume.volume_title);
+    setField('volume.identifier', book.volume.identifier);
+    setField('volume.version', book.volume.version);
+    setField('volume.publication_year', book.volume.publication_year);
+    setField('volume.responsibility', book.volume.responsibility);
   }
+  if (book?.copy) {
+    for (const key of ['acquisition_date', 'location', 'reading_record']) {
+      setField(`copy.${key}`, book.copy[key]);
+    }
+  }
+  updateDisclosureCounts(form);
+  form.querySelectorAll('[data-disclosure].has-values').forEach((details) => {
+    details.open = true;
+  });
   bookDialog.showModal();
 }
 
@@ -1541,7 +1526,8 @@ function formPayload() {
       title: get('edition.title'), subtitle: get('edition.subtitle'),
       existing_edition_id: Number(document.querySelector('#existing-edition-id').value) || null,
       work_relations: editionWorkRelations(form.querySelector('[data-edition-work-links]')),
-      identifier: repeatableValue(form, 'edition.identifier'), translator: get('edition.translator'),
+      identifier: repeatableValue(form, 'edition.identifier'),
+      translator: get('edition.translator'),
       other_title: otherTitles.other_title,
       other_subtitle: otherTitles.other_subtitle,
       translated_title: get('edition.translated_title'),
@@ -1549,20 +1535,251 @@ function formPayload() {
       edition_scripts: get('edition.edition_scripts'),
       version: repeatableValue(form, 'edition.version', true),
       series: get('edition.series'),
-      publisher: get('edition.publisher'), publisher_id: null, publisher_canonical: '',
+      publisher: get('edition.publisher'),
+      publisher_id: null,
+      publisher_canonical: '',
       publication_year: year || null,
       force_new_edition: form.elements.namedItem('edition.force_new_edition').checked
     },
+    volume: {
+      volume_number: get('volume.volume_number'),
+      volume_title: get('volume.volume_title'),
+      identifier: get('volume.identifier'),
+      version: get('volume.version'),
+      publication_year: get('volume.publication_year') || null,
+      responsibility: get('volume.responsibility')
+    },
     copy: {
-      volume_number: get('copy.volume_number'),
-      volume_title: get('copy.volume_title'),
-      identifier: get('copy.identifier'),
-      identifier_transition: null,
       acquisition_date: get('copy.acquisition_date') || null,
-      location: get('copy.location'), reading_record: get('copy.reading_record')
+      location: get('copy.location'),
+      reading_record: get('copy.reading_record')
     }
   };
 }
+
+function findEditionGroup(editionId) {
+  return activeWork?.editions?.find((item) => item.id === Number(editionId)) || null;
+}
+
+function findVolumeInActiveWork(volumeId) {
+  for (const group of activeWork?.editions || []) {
+    const volume = groupedVolumes(group).find((item) => item.id === Number(volumeId));
+    if (volume) return {group, volume};
+  }
+  return null;
+}
+
+function findCopyInActiveWork(copyId) {
+  for (const group of activeWork?.editions || []) {
+    for (const volume of groupedVolumes(group)) {
+      const copy = (volume.copies || []).find((item) => item.id === Number(copyId));
+      if (copy) return {group, volume, copy};
+    }
+  }
+  return null;
+}
+
+async function refreshActiveDetail() {
+  if (!activeWork) return;
+  activeWork = await request(`/api/works/${activeWork.id}`);
+  await loadWorks(searchInput.value);
+  renderCurrentDetail();
+}
+
+function openEditionEditor(group) {
+  activeEdition = group;
+  const editForm = document.querySelector('#edition-edit-form');
+  editForm.reset();
+  for (const [key, value] of Object.entries(group.edition)) {
+    if (!['identifier', 'version', 'other_title', 'other_subtitle'].includes(key)) {
+      const control = editForm.elements.namedItem(key);
+      if (control) control.value = value ?? '';
+    }
+  }
+  setRepeatable(editForm, 'identifier', group.edition.identifier);
+  setEditionWorkLinks(
+    editForm.querySelector('[data-edition-work-links]'),
+    group.edition.work_relations ?? group.edition.work_ids,
+    activeWork.id,
+    group.id
+  );
+  setRepeatable(editForm, 'version', group.edition.version);
+  setTitlePairs(
+    editForm.querySelector('[data-paired-titles]'),
+    group.edition.other_title, group.edition.other_subtitle
+  );
+  updateDisclosureCounts(editForm);
+  editionEditDialog.showModal();
+}
+
+function openVolumeEditor(volume = null, editionId = null) {
+  const editForm = document.querySelector('#volume-edit-form');
+  editForm.reset();
+  activeVolume = volume;
+  activeEdition = findEditionGroup(editionId ?? volume?.edition_id);
+  for (const name of [
+    'volume_number', 'volume_title', 'identifier', 'version',
+    'publication_year', 'responsibility'
+  ]) {
+    editForm.elements.namedItem(name).value = volume?.[name] ?? '';
+  }
+  volumeEditDialog.showModal();
+}
+
+function openCopyEditor(copy = null, volumeId = null) {
+  const editForm = document.querySelector('#copy-edit-form');
+  editForm.reset();
+  editingCopyId = copy?.id ?? null;
+  editingCopyVolumeId = Number(volumeId ?? copy?.volume_id);
+  document.querySelector('#copy-edit-title').textContent =
+    copy ? '修改館藏資料' : '新增實物副本';
+  for (const name of ['location', 'acquisition_date', 'reading_record']) {
+    editForm.elements.namedItem(name).value = copy?.[name] ?? '';
+  }
+  copyEditDialog.showModal();
+}
+
+async function deleteEditionGroup(group) {
+  if (!group || !window.confirm(
+    `確定刪除此版本及其 ${groupCopies(group).length} 份實物副本嗎？`
+  )) return;
+  const result = await request(`/api/editions/${group.id}`, {method: 'DELETE'});
+  if (activeTopEditionId !== null
+      || result.work_deleted
+      || result.deleted_work_ids?.includes(activeWork.id)) {
+    detailDialog.close();
+    activeWork = null;
+    activeTopEditionId = null;
+  } else {
+    await refreshActiveDetail();
+  }
+  await loadWorks(searchInput.value);
+  flash('版本已刪除。');
+}
+
+async function deleteVolumeRecord(volume) {
+  if (!volume || !window.confirm(
+    `確定刪除「${volumeName(volume, '單冊').replaceAll('&middot;', '·')}」及其 ${volume.copies.length} 份副本嗎？`
+  )) return;
+  await request(`/api/volumes/${volume.id}`, {method: 'DELETE'});
+  await refreshActiveDetail();
+  flash('冊已刪除，Edition 已保留。');
+}
+
+async function deleteCopyRecord(copy) {
+  if (!copy || !window.confirm(`確定刪除實物副本 #${copy.id} 嗎？`)) return;
+  await request(`/api/copies/${copy.id}`, {method: 'DELETE'});
+  if (copyDialog.open) copyDialog.close();
+  activeCopy = null;
+  await refreshActiveDetail();
+  flash('實物副本已刪除。');
+}
+
+async function handleLayerAction(button) {
+  const action = button.dataset.layerAction;
+  const id = Number(button.dataset.layerId);
+  closeActionMenus();
+  if (action === 'edit-work') return openWorkEditor(activeWork);
+  if (action === 'add-edition') {
+    detailDialog.close();
+    return openForm(null, activeWork.work, null, activeWork.id);
+  }
+  if (action === 'delete-work') {
+    return deleteActiveWork();
+  }
+  if (button.dataset.layer === 'edition') {
+    const group = findEditionGroup(id);
+    if (!group) return;
+    if (action === 'edit-edition') return openEditionEditor(group);
+    if (action === 'add-volume') return openVolumeEditor(null, group.id);
+    if (action.startsWith('add-copy-')) {
+      return openCopyEditor(null, Number(action.slice('add-copy-'.length)));
+    }
+    if (action === 'delete-edition') {
+      try { await deleteEditionGroup(group); }
+      catch (error) { flash(error.message, 'error'); }
+    }
+    return;
+  }
+  if (button.dataset.layer === 'volume') {
+    const found = findVolumeInActiveWork(id);
+    if (!found) return;
+    if (action === 'edit-volume') return openVolumeEditor(found.volume, found.group.id);
+    if (action === 'add-copy') return openCopyEditor(null, found.volume.id);
+    if (action === 'delete-volume') {
+      try { await deleteVolumeRecord(found.volume); }
+      catch (error) { flash(error.message, 'error'); }
+    }
+    return;
+  }
+  if (button.dataset.layer === 'copy') {
+    const found = findCopyInActiveWork(id);
+    const copy = found?.copy || (activeCopy?.id === id ? activeCopy : null);
+    if (!copy) return;
+    if (action === 'edit-copy') return openCopyEditor(copy, copy.volume_id);
+    if (action === 'delete-copy') {
+      try { await deleteCopyRecord(copy); }
+      catch (error) { flash(error.message, 'error'); }
+    }
+  }
+}
+
+
+// Progressive-disclosure counts update while typing.
+form.addEventListener('input', () => updateDisclosureCounts(form));
+form.addEventListener('change', () => updateDisclosureCounts(form));
+
+list.addEventListener('click', (event) => {
+  const toggle = event.target.closest('[data-group-toggle]');
+  if (!toggle) return;
+  const group = toggle.closest('.view-group');
+  const collapsed = group.classList.toggle('is-collapsed');
+  toggle.setAttribute('aria-expanded', String(!collapsed));
+});
+
+function setAllGroups(collapsed) {
+  setPreference('groups-collapsed', collapsed);
+  document.querySelectorAll('.view-group').forEach((group) => {
+    group.classList.toggle('is-collapsed', collapsed);
+    group.querySelector('[data-group-toggle]')
+      ?.setAttribute('aria-expanded', String(!collapsed));
+  });
+}
+document.querySelector('[data-groups-collapse]').addEventListener('click', () => setAllGroups(true));
+document.querySelector('[data-groups-expand]').addEventListener('click', () => setAllGroups(false));
+
+document.querySelector('[data-tags-collapse]').addEventListener('click', () => {
+  setPreference('tags-collapsed', true);
+  document.querySelectorAll('.tag-tree-node:has(.tag-tree-children)').forEach((node) => {
+    node.classList.add('is-collapsed');
+    node.querySelector(':scope > .tag-tree-row [data-tag-toggle]')
+      ?.setAttribute('aria-expanded', 'false');
+  });
+});
+document.querySelector('[data-tags-expand]').addEventListener('click', () => {
+  setPreference('tags-collapsed', false);
+  document.querySelectorAll('.tag-tree-node').forEach((node) => {
+    node.classList.remove('is-collapsed');
+    node.querySelector(':scope > .tag-tree-row [data-tag-toggle]')
+      ?.setAttribute('aria-expanded', 'true');
+  });
+});
+
+function setAllPublishers(collapsed) {
+  setPreference('publishers-collapsed', collapsed);
+  document.querySelectorAll('[data-publisher-row]').forEach((row) => {
+    row.classList.toggle('is-collapsed', collapsed);
+    row.querySelector('[data-publisher-toggle]')
+      ?.setAttribute('aria-expanded', String(!collapsed));
+  });
+}
+document.querySelector('[data-publishers-collapse]').addEventListener('click', () => setAllPublishers(true));
+document.querySelector('[data-publishers-expand]').addEventListener('click', () => setAllPublishers(false));
+
+document.addEventListener('click', (event) => {
+  const menu = event.target.closest('[data-action-menu]');
+  closeActionMenus(menu);
+});
 
 searchForm.addEventListener('submit', (event) => {
   event.preventDefault(); loadWorks(searchInput.value);
@@ -1576,11 +1793,11 @@ document.querySelector('#import-button').addEventListener('click', () => {
   csvFileInput.click();
 });
 viewSelect.addEventListener('change', () => {
-  localStorage.setItem('book-catalog-view', viewSelect.value);
+  setPreference('view', viewSelect.value);
   renderWorks(searchInput.value);
 });
 topModeSelect.addEventListener('change', () => {
-  localStorage.setItem('book-catalog-top-mode', topModeSelect.value);
+  setPreference('top-mode', topModeSelect.value);
   renderWorks(searchInput.value);
 });
 form.elements.namedItem('copy-mode').forEach((radio) =>
@@ -1599,73 +1816,16 @@ list.addEventListener('click', (event) => {
   if (row) openWork(Number(row.dataset.workId));
 });
 document.querySelector('#detail-content').addEventListener('click', async (event) => {
+  const action = event.target.closest('[data-layer-action]');
+  if (action) {
+    await handleLayerAction(action);
+    return;
+  }
   const copyRow = event.target.closest('[data-copy-id]');
-  if (copyRow) {
-    openCopy(Number(copyRow.dataset.copyId));
-    return;
-  }
-  const deleteEditionButton = event.target.closest('[data-delete-edition]');
-  if (deleteEditionButton) {
-    const group = activeWork.editions.find(
-      (item) => item.id === Number(deleteEditionButton.dataset.deleteEdition)
-    );
-    if (!group || !window.confirm(`確定刪除此版本及其 ${group.copies.length} 冊實物冊嗎？`)) return;
-    try {
-      const result = await request(`/api/editions/${group.id}`, {method: 'DELETE'});
-      if (activeTopEditionId !== null
-          || result.work_deleted
-          || result.deleted_work_ids?.includes(activeWork.id)) {
-        detailDialog.close();
-        activeWork = null;
-        activeTopEditionId = null;
-      } else {
-        activeWork = await request(`/api/works/${activeWork.id}`);
-        renderWorkDetail(activeWork);
-      }
-      await loadWorks(searchInput.value);
-      flash('版本及其實物冊已刪除。');
-    } catch (error) {
-      flash(error.message, 'error');
-    }
-    return;
-  }
-  const addButton = event.target.closest('[data-add-edition-copy]');
-  if (addButton) {
-    const group = activeWork.editions.find((item) => item.id === Number(addButton.dataset.addEditionCopy));
-    detailDialog.close();
-    openForm(null, activeWork.work, group.edition, activeWork.id, group.id);
-    return;
-  }
-  const editButton = event.target.closest('[data-edit-edition]');
-  if (editButton) {
-    activeEdition = activeWork.editions.find((item) => item.id === Number(editButton.dataset.editEdition));
-    const editForm = document.querySelector('#edition-edit-form');
-    for (const [key, value] of Object.entries(activeEdition.edition)) {
-      if (!['identifier', 'version', 'other_title', 'other_subtitle'].includes(key)) {
-        const control = editForm.elements.namedItem(key);
-        if (control) control.value = value ?? '';
-      }
-    }
-    setRepeatable(editForm, 'identifier', activeEdition.edition.identifier);
-    setEditionWorkLinks(
-      editForm.querySelector('[data-edition-work-links]'),
-      activeEdition.edition.work_relations ?? activeEdition.edition.work_ids,
-      activeWork.id
-    );
-    setRepeatable(editForm, 'version', activeEdition.edition.version);
-    setTitlePairs(
-      editForm.querySelector('[data-paired-titles]'),
-      activeEdition.edition.other_title,
-      activeEdition.edition.other_subtitle
-    );
-    editionEditDialog.showModal();
-  }
+  if (copyRow) openCopy(Number(copyRow.dataset.copyId));
 });
-document.querySelector('#add-work-copy-button').addEventListener('click', () => {
-  detailDialog.close(); openForm(null, activeWork.work, null, activeWork.id);
-});
-document.querySelector('#delete-work-button').addEventListener('click', async () => {
-  if (!activeWork || !window.confirm(`確定刪除作品「${activeWork.work.title}」嗎？僅關聯此作品的 Edition 會一併刪除；仍關聯其他 Work 的合刊 Edition 與實物冊會保留。`)) return;
+async function deleteActiveWork() {
+  if (!activeWork || !window.confirm(`確定刪除作品「${activeWork.work.title}」嗎？僅關聯此作品的 Edition 會一併刪除；仍關聯其他 Work 的合刊 Edition 與實物副本會保留。`)) return;
   try {
     await request(`/api/works/${activeWork.id}`, {method: 'DELETE'});
     detailDialog.close();
@@ -1675,10 +1835,7 @@ document.querySelector('#delete-work-button').addEventListener('click', async ()
   } catch (error) {
     flash(error.message, 'error');
   }
-});
-document.querySelector('#edit-work-button').addEventListener('click', () => {
-  openWorkEditor(activeWork);
-});
+}
 document.querySelectorAll('[data-close]').forEach((button) => button.addEventListener('click', () => bookDialog.close()));
 document.querySelectorAll('[data-detail-close]').forEach((button) => button.addEventListener('click', () => detailDialog.close()));
 document.querySelectorAll('[data-copy-close]').forEach((button) => button.addEventListener('click', () => copyDialog.close()));
@@ -1688,15 +1845,13 @@ document.querySelectorAll('[data-import-close]').forEach((button) => button.addE
 document.querySelectorAll('[data-work-edit-close]').forEach((button) => button.addEventListener('click', () => workEditDialog.close()));
 document.querySelectorAll('[data-edition-edit-close]').forEach((button) => button.addEventListener('click', () => editionEditDialog.close()));
 document.querySelectorAll('[data-copy-edit-close]').forEach((button) => button.addEventListener('click', () => copyEditDialog.close()));
+document.querySelectorAll('[data-volume-edit-close]').forEach((button) => button.addEventListener('click', () => volumeEditDialog.close()));
 document.querySelector('#tag-tree').addEventListener('click', async (event) => {
   const toggle = event.target.closest('[data-tag-toggle]');
   if (toggle) {
-    const children = toggle.closest('.tag-tree-node').querySelector(':scope > .tag-tree-children');
-    const collapsed = !children.hidden;
-    children.hidden = collapsed;
-    toggle.textContent = collapsed ? '▸' : '▾';
+    const node = toggle.closest('.tag-tree-node');
+    const collapsed = node.classList.toggle('is-collapsed');
     toggle.setAttribute('aria-expanded', String(!collapsed));
-    toggle.setAttribute('aria-label', collapsed ? '展開下級' : '收合下級');
     return;
   }
   const button = event.target.closest('[data-delete-tag]');
@@ -1713,6 +1868,13 @@ document.querySelector('#tag-tree').addEventListener('click', async (event) => {
   }
 });
 document.querySelector('#publisher-list').addEventListener('click', async (event) => {
+  const toggle = event.target.closest('[data-publisher-toggle]');
+  if (toggle) {
+    const row = toggle.closest('[data-publisher-row]');
+    const collapsed = row.classList.toggle('is-collapsed');
+    toggle.setAttribute('aria-expanded', String(!collapsed));
+    return;
+  }
   const button = event.target.closest('[data-delete-publisher]');
   if (!button) return;
   const publisher = publishers.find((item) => item.id === Number(button.dataset.deletePublisher));
@@ -1815,7 +1977,7 @@ document.querySelector('#edition-edit-form').addEventListener('submit', async (e
   const year = get('publication_year');
   const otherTitles = titlePairValues(editForm.querySelector('[data-paired-titles]'));
   try {
-    activeWork = await request(`/api/editions/${activeEdition.id}`, {
+    await request(`/api/editions/${activeEdition.id}`, {
       method: 'PUT', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({
         title: get('title'), subtitle: get('subtitle'),
@@ -1830,60 +1992,64 @@ document.querySelector('#edition-edit-form').addEventListener('submit', async (e
         translated_title: get('translated_title'), translated_subtitle: get('translated_subtitle')
       })
     });
+    activeWork = await request(`/api/works/${activeWork.id}`);
     editionEditDialog.close();
     await loadPublishers(); await loadWorks(searchInput.value);
     renderCurrentDetail();
     flash('版本資料已更新。');
   } catch (error) { flash(error.message, 'error'); }
 });
+document.querySelector('#volume-edit-form').addEventListener('submit', async (event) => {
+  event.preventDefault();
+  const editForm = event.currentTarget;
+  const get = (name) => editForm.elements.namedItem(name).value.trim();
+  const payload = {
+    position: activeVolume?.position ?? null,
+    volume_number: get('volume_number'),
+    volume_title: get('volume_title'),
+    identifier: get('identifier'),
+    version: get('version'),
+    publication_year: get('publication_year') || null,
+    responsibility: get('responsibility')
+  };
+  try {
+    if (activeVolume) {
+      await requestJson(`/api/volumes/${activeVolume.id}`, {method: 'PUT'}, payload);
+    } else {
+      await requestJson(
+        `/api/editions/${activeEdition.id}/volumes`, {method: 'POST'}, payload
+      );
+    }
+    volumeEditDialog.close();
+    await refreshActiveDetail();
+    flash(activeVolume ? '冊資料已更新。' : '新冊已建立。');
+  } catch (error) {
+    flash(error.message, 'error');
+  }
+});
+
 document.querySelector('#copy-edit-form').addEventListener('submit', async (event) => {
   event.preventDefault();
   const editForm = event.currentTarget;
   const get = (name) => editForm.elements.namedItem(name).value.trim();
+  const payload = {
+    volume_id: editingCopyVolumeId,
+    acquisition_date: get('acquisition_date') || null,
+    location: get('location'),
+    reading_record: get('reading_record')
+  };
   try {
-    const payload = {
-      volume_number: get('volume_number'), volume_title: get('volume_title'),
-      identifier: get('identifier'), identifier_transition: null,
-      acquisition_date: get('acquisition_date') || null,
-      location: get('location'), reading_record: get('reading_record')
-    };
-    activeBook = await requestWithIdentifierDecision(`/api/copies/${activeBook.id}`, {
-      method: 'PUT', headers: {'Content-Type': 'application/json'}
-    }, payload);
-    copyEditDialog.close();
-    copyDialog.close();
-    activeWork = await request(`/api/works/${activeWork.id}`);
-    await loadTags(); await loadPublishers(); await loadWorks(searchInput.value);
-    renderCurrentDetail();
-    flash(`實物冊 #${activeBook.id} 已更新。`);
-  } catch (error) { flash(error.message, 'error'); }
-});
-document.querySelector('#edit-copy-button').addEventListener('click', () => {
-  const editForm = document.querySelector('#copy-edit-form');
-  for (const [key, value] of Object.entries(activeBook.copy)) {
-    const control = editForm.elements.namedItem(key);
-    if (control) control.value = value ?? '';
-  }
-  copyEditDialog.showModal();
-});
-document.querySelector('#delete-copy-button').addEventListener('click', async () => {
-  if (!activeBook) return;
-  const label = `#${activeBook.id}${(activeBook.copy.volume_number || activeBook.copy.volume_title) ? `（卷冊 ${[activeBook.copy.volume_number, activeBook.copy.volume_title].filter(Boolean).join(' · ')}）` : ''}`;
-  if (!window.confirm(`確定刪除實物冊 ${label} 嗎？`)) return;
-  const workId = activeWork?.id;
-  try {
-    const result = await request(`/api/copies/${activeBook.id}`, {method: 'DELETE'});
-    copyDialog.close();
-    if (result.work_deleted || result.deleted_work_ids?.includes(workId) || !workId) {
-      detailDialog.close();
-      activeWork = null;
+    if (editingCopyId) {
+      await requestJson(`/api/copies/${editingCopyId}`, {method: 'PUT'}, payload);
     } else {
-      activeWork = await request(`/api/works/${workId}`);
+      await requestJson(
+        `/api/volumes/${editingCopyVolumeId}/copies`, {method: 'POST'}, payload
+      );
     }
-    activeBook = null;
-    await loadWorks(searchInput.value);
-    if (activeWork) renderCurrentDetail();
-    flash('實物冊已刪除。');
+    copyEditDialog.close();
+    if (copyDialog.open) copyDialog.close();
+    await refreshActiveDetail();
+    flash(editingCopyId ? '館藏資料已更新。' : '實物副本已新增。');
   } catch (error) {
     flash(error.message, 'error');
   }
@@ -1899,11 +2065,11 @@ form.addEventListener('submit', async (event) => {
     let saved;
     if (isBatch) {
       const batchPayload = {...payload, ...batchVolumeData()};
-      saved = await requestWithIdentifierDecision('/api/books/batch', {
+      saved = await requestJson('/api/books/batch', {
         method: 'POST', headers: {'Content-Type': 'application/json'}
       }, batchPayload);
     } else {
-      saved = await requestWithIdentifierDecision(id ? '/api/books/' + id : '/api/books', {
+      saved = await requestJson(id ? '/api/books/' + id : '/api/books', {
         method: id ? 'PUT' : 'POST', headers: {'Content-Type': 'application/json'}
       }, payload);
     }
@@ -1911,7 +2077,7 @@ form.addEventListener('submit', async (event) => {
     await loadTags(); await loadPublishers(); await loadWorks(searchInput.value);
     if (id) flash('藏書資料已更新。');
     else if (isBatch) flash('已在同一版本下新增 ' + saved.length + ' 冊。');
-    else flash('實物冊 #' + saved.id + ' 已加入書架。');
+    else flash('實物副本 #' + saved.id + ' 已加入書架。');
   } catch (error) {
     flash(error.message, 'error');
   } finally {
@@ -1922,38 +2088,34 @@ form.addEventListener('submit', async (event) => {
 function renderImportPreview() {
   const preview = document.querySelector('#import-preview');
   document.querySelector('#import-summary').textContent =
-    `共讀取 ${importRows.length} 行；題名與作者、版本及卷冊會自動併入既有層級。`;
+    `共讀取 ${importRows.length} 行；系統會分別檢查 Work、Edition、Volume 與 Copy 候選。`;
   preview.innerHTML = importRows.map((row, index) => {
     const book = row.book;
     const matches = row.matching_copies;
+    const volumeMatches = row.matching_volumes ?? [];
     const editionMatches = row.matching_edition_copies ?? [];
     const volumes = [...new Set(editionMatches.map((match) =>
-      [match.volume_number, match.volume_title].filter(Boolean).join(' · ') || '未標卷冊'
+      [match.volume_number, match.volume_title].filter(Boolean).join(' · ') || '未標冊'
     ))];
     const matchText = matches.length
-      ? `找到 ${matches.length} 個同版本、同卷冊的實物冊`
-      : editionMatches.length
-        ? `已識別為同一版本；既有卷冊：${volumes.map(escapeHtml).join('; ')}`
-        : '新增作品或版本';
+      ? `找到 ${matches.length} 個館藏欄位完全相同的實物副本`
+      : volumeMatches.length
+        ? '已識別為同一冊；可新增為另一實物副本'
+        : editionMatches.length
+          ? `已識別為同一版本；既有冊：${volumes.map(escapeHtml).join('; ')}`
+          : '新增作品或版本';
     return `<div class="import-row">
       <label class="import-keep"><input type="checkbox" data-import-keep="${index}" checked> 保留</label>
       <div><strong>${escapeHtml(book.work.title)}</strong>
-        <small>${shown(book.work.authors)} · ${shown(book.edition.version)} · 卷冊 ${shown([book.copy.volume_number, book.copy.volume_title].filter(Boolean).join(' · '))}</small>
+        <small>${shown(book.work.authors)} · ${shown(book.edition.version)} · 冊 ${shown([book.volume.volume_number, book.volume.volume_title].filter(Boolean).join(' · '))}</small>
         <small>${matchText}</small></div>
-      ${row.identifier_transition_required ? `<label>冊級識別號處理
-        <select data-import-identifier-transition="${index}" required>
-          <option value="">請選擇</option>
-          <option value="keep">保留 Edition 識別號並存</option>
-          <option value="demote">下沉「${escapeHtml(row.transition_edition_identifier)}」並清空 Edition 識別號</option>
-        </select>
-      </label>` : ''}
-      <label>實物冊處理
+      <label>實物副本處理
         <select data-import-action="${index}" ${matches.length ? '' : 'disabled'}>
           ${matches.map((match) => match.id
-            ? `<option value="copy:${match.id}">覆蓋實物冊 #${match.id}${match.location ? ` · ${escapeHtml(match.location)}` : ''}</option>`
-            : `<option value="row:${match.row_number}">覆蓋本次 CSV 第 ${match.row_number} 行的實物冊</option>`
+            ? `<option value="copy:${match.id}">覆蓋實物副本 #${match.id}${match.location ? ` · ${escapeHtml(match.location)}` : ''}</option>`
+            : `<option value="row:${match.row_number}">覆蓋本次 CSV 第 ${match.row_number} 行的實物副本</option>`
           ).join('')}
-          <option value="import">${matches.length ? '仍新增為另一實物冊' : '新增實物冊'}</option>
+          <option value="import">${matches.length ? '仍新增為另一實物副本' : '新增實物副本'}</option>
         </select>
       </label>
     </div>`;
@@ -2006,13 +2168,6 @@ document.querySelector('#import-confirm').addEventListener('click', async () => 
       const choice = document.querySelector(`[data-import-action="${index}"]`)?.value ?? 'import';
       const [kind, rawTarget] = choice.split(':');
       const book = structuredClone(row.book);
-      const transition = document.querySelector(
-        `[data-import-identifier-transition="${index}"]`
-      );
-      if (transition && !transition.value) {
-        throw new Error(`CSV 第 ${row.row_number} 行必須選擇冊級識別號處理方式。`);
-      }
-      if (transition) book.copy.identifier_transition = transition.value;
       return {
         row_number: row.row_number,
         book,
@@ -2028,7 +2183,7 @@ document.querySelector('#import-confirm').addEventListener('click', async () => 
     });
     importDialog.close();
     await loadTags(); await loadPublishers(); await loadWorks(searchInput.value);
-    flash(`已新增 ${result.imported} 冊，覆蓋 ${result.overwritten} 冊實物冊。`);
+    flash(`已新增 ${result.imported} 冊，覆蓋 ${result.overwritten}  份實物副本。`);
   } catch (error) {
     flash(error.message, 'error');
     button.disabled = false;
@@ -2051,14 +2206,15 @@ function addExportControls() {
 form.elements.namedItem('work.authors').placeholder = '多項用半角分號 ; 分隔';
 form.elements.namedItem('work.scripts').placeholder = '多項用半角分號 ; 分隔';
 setupTagPickers();
+updateDisclosureCounts(form);
 setupEditionWorkLinks();
 setupWorkEditionLinks();
 addExportControls();
-const savedView = localStorage.getItem('book-catalog-view');
+const savedView = getPreference('view');
 if (Array.from(viewSelect.options).some((option) => option.value === savedView)) {
   viewSelect.value = savedView;
 }
-const savedTopMode = localStorage.getItem('book-catalog-top-mode');
+const savedTopMode = getPreference('top-mode');
 if (Array.from(topModeSelect.options).some((option) => option.value === savedTopMode)) {
   topModeSelect.value = savedTopMode;
 }

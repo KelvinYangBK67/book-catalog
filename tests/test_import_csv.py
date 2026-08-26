@@ -10,7 +10,8 @@ from app.database import initialize
 from app.import_csv import CsvImportCommit, CsvImportSelection, csv_import, preview_csv
 from app.repository import create_book, list_books, list_publishers, normalize_publisher
 from app.schemas import (
-    BookInput, CopyInput, EditionInput, PublisherNormalizationInput, WorkInput,
+    BookInput, CopyInput, EditionInput, PublisherNormalizationInput, VolumeInput,
+    WorkInput,
     normalize_version_text,
 )
 
@@ -19,7 +20,8 @@ def make_book(publisher: str = 'Raw Press') -> BookInput:
     return BookInput(
         work=WorkInput(title='Shared Title', authors='Shared Author'),
         edition=EditionInput(version='2', series='Collected Works', publisher=publisher),
-        copy=CopyInput(volume='1', location='Shelf A'),
+        volume=VolumeInput(volume_number='1'),
+        copy=CopyInput(location='Shelf A'),
     )
 
 
@@ -59,30 +61,31 @@ class ImportAndNormalizationTests(unittest.TestCase):
 
     def test_csv_preview_resolves_publisher_alias_like_form_submission(self) -> None:
         normalize_publisher(PublisherNormalizationInput(
-            canonical_name='Preferred Press', aliases=['Raw Press', 'Alias Press'],
+            canonical_name="Preferred Press", aliases=["Raw Press", "Alias Press"],
         ))
-        create_book(make_book('Raw Press'))
+        create_book(make_book("Raw Press"))
         rows = preview_csv(
-            b'title,authors,version,series,publisher,volume,location\n'
-            b'Shared Title,Shared Author,2,Collected Works,Alias Press,1,Shelf B\n'
+            b"title,authors,version,series,publisher,volume,location\n"
+            b"Shared Title,Shared Author,2,Collected Works,Alias Press,1,Shelf B\n"
         )
-        self.assertEqual(len(rows[0]['matching_copies']), 1)
-        self.assertIsNotNone(rows[0]['book']['edition']['publisher_id'])
+        self.assertEqual(len(rows[0]["matching_volumes"]), 1)
+        self.assertEqual(len(rows[0]["matching_copies"]), 0)
+        self.assertIsNotNone(rows[0]["book"]["edition"]["publisher_id"])
 
     def test_csv_preview_detects_existing_and_in_file_copy_matches(self) -> None:
         create_book(make_book())
-        csv_bytes = (
-            'title,authors,version,series,publisher,volume,location\n'
-            'Shared Title,Shared Author,2,Collected Works,Raw Press,1,Shelf B\n'
-            'Shared Title,Shared Author,2,Collected Works,Raw Press,1,Shelf C\n'
-        ).encode()
-
-        rows = preview_csv(csv_bytes)
+        rows = preview_csv((
+            "title,authors,version,series,publisher,volume,location\n"
+            "Shared Title,Shared Author,2,Collected Works,Raw Press,1,Shelf B\n"
+            "Shared Title,Shared Author,2,Collected Works,Raw Press,1,Shelf A\n"
+        ).encode())
 
         self.assertEqual(len(rows), 2)
-        self.assertEqual(rows[0]['book']['edition']['series'], 'Collected Works')
-        self.assertEqual(len(rows[0]['matching_copies']), 1)
-        self.assertEqual(len(rows[1]['matching_copies']), 2)
+        self.assertEqual(rows[0]["book"]["edition"]["series"], "Collected Works")
+        self.assertGreaterEqual(len(rows[0]["matching_volumes"]), 1)
+        self.assertEqual(len(rows[0]["matching_copies"]), 0)
+        self.assertGreaterEqual(len(rows[1]["matching_volumes"]), 1)
+        self.assertEqual(len(rows[1]["matching_copies"]), 1)
 
     def test_three_volumes_are_grouped_under_one_work_and_edition(self) -> None:
         rows = preview_csv(
@@ -109,7 +112,7 @@ class ImportAndNormalizationTests(unittest.TestCase):
         self.assertEqual(len({book['work']['title'] for book in books}), 1)
         self.assertEqual(len({book['edition']['version'] for book in books}), 1)
         self.assertEqual(
-            {book['copy']['volume_number'] for book in books},
+            {book['volume']['volume_number'] for book in books},
             {'1', '2', '3'},
         )
 
@@ -140,33 +143,29 @@ class ImportAndNormalizationTests(unittest.TestCase):
         self.assertEqual(books[0]['edition']['series'], 'Collected Works')
         self.assertEqual(books[0]['copy']['location'], 'Shelf B')
 
-    def test_csv_requires_explicit_identifier_transition_choice(self) -> None:
+    def test_csv_volume_identifier_coexists_with_edition_identifier(self) -> None:
         original_book = make_book()
         original_book.edition.identifier = "ISBN SET"
         create_book(original_book)
 
         rows = preview_csv(
-            b'title,authors,identifier,version,series,publisher,volume,copy_identifier,location\n'
-            b'Shared Title,Shared Author,ISBN SET,2,Collected Works,Raw Press,2,ISBN VOLUME-2,Shelf B\n'
+            b"title,authors,identifier,version,series,publisher,volume,copy_identifier,location\n"
+            b"Shared Title,Shared Author,ISBN SET,2,Collected Works,Raw Press,2,ISBN VOLUME-2,Shelf B\n"
         )
-        self.assertTrue(rows[0]['identifier_transition_required'])
-        self.assertEqual(rows[0]['transition_edition_identifier'], 'ISBN SET')
-
-        imported = BookInput.model_validate(rows[0]['book'])
-        imported.copy_.identifier_transition = 'keep'
+        imported = BookInput.model_validate(rows[0]["book"])
         csv_import(CsvImportCommit(rows=[CsvImportSelection(
-            row_number=rows[0]['row_number'],
+            row_number=rows[0]["row_number"],
             book=imported,
-            csv_fields=rows[0]['csv_fields'],
-            action='create',
+            csv_fields=rows[0]["csv_fields"],
+            action="create",
         )]))
 
         books = list_books()
         self.assertEqual(len(books), 2)
-        self.assertEqual({book['edition']['identifier'] for book in books}, {'ISBN SET'})
+        self.assertEqual({book["edition"]["identifier"] for book in books}, {"ISBN SET"})
         self.assertEqual(
-            {book['copy']['identifier'] for book in books},
-            {'', 'ISBN VOLUME-2'},
+            {book["volume"]["identifier"] for book in books},
+            {"", "ISBN VOLUME-2"},
         )
 
     def test_csv_can_overwrite_an_existing_copy(self) -> None:
@@ -202,7 +201,8 @@ class ImportAndNormalizationTests(unittest.TestCase):
                 identifier='ISBN 123', translator='Translator', series='Series',
                 publisher='Press', publication_year=2020,
             ),
-            copy=CopyInput(volume='1', location='Old shelf', reading_record='Read'),
+            volume=VolumeInput(volume_number='1'),
+            copy=CopyInput(location='Old shelf', reading_record='Read'),
         ))
         rows = preview_csv(
             b'title,authors,subtitle,tags,identifier,series,location\n'
