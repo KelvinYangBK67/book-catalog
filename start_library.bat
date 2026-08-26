@@ -51,7 +51,7 @@ echo [Stopping] Close this window or press Ctrl+C.
 echo.
 
 if "%OPEN_BROWSER%"=="1" start "" /B powershell.exe -NoProfile -WindowStyle Hidden -Command "Start-Sleep -Milliseconds 1200; Start-Process '%LIBRARY_URL%'"
-"%VENV_PYTHON%" -m uvicorn app.main:app --host 127.0.0.1 --port %LIBRARY_PORT%
+"%VENV_PYTHON%" -m uvicorn app.main:app --host 127.0.0.1 --port %LIBRARY_PORT% --reload --reload-dir app
 if errorlevel 1 goto server_failed
 goto end
 
