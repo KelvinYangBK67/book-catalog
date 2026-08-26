@@ -81,14 +81,14 @@ class JsonV2RoundTripTests(unittest.TestCase):
                 ),
                 edition=EditionInput(
                     title="Edition Title",
-                    identifier="ISBN SET",
+                    identifier="CATALOG SET",
                     version="Second",
                     publisher="Raw Press",
                     publisher_id=publisher["id"],
                     work_ids=[other["id"]],
                 ),
                 volume=VolumeInput(
-                    position=1, volume_number="1", identifier="ISBN V1",
+                    position=1, volume_number="1", identifier="CATALOG V1",
                     version="Volume Version", publication_year=2001,
                     responsibility="Volume Editor",
                 ),
@@ -104,14 +104,14 @@ class JsonV2RoundTripTests(unittest.TestCase):
                 ),
                 edition=EditionInput(
                     title="Edition Title",
-                    identifier="ISBN SET",
+                    identifier="CATALOG SET",
                     version="Second",
                     publisher="Raw Press",
                     publisher_id=publisher["id"],
                     work_ids=[other["id"]],
                 ),
                 volume=VolumeInput(
-                    position=2, volume_number="2", identifier="ISBN V2",
+                    position=2, volume_number="2", identifier="CATALOG V2",
                     version="Other Volume Version", publication_year=2002,
                     responsibility="Other Editor",
                 ),
@@ -128,7 +128,7 @@ class JsonV2RoundTripTests(unittest.TestCase):
             self.assertEqual(roundtrip["schema_version"], 2)
             self.assertEqual(
                 [v["identifier"] for v in roundtrip["volumes"]],
-                ["ISBN V1", "ISBN V2"],
+                ["CATALOG V1", "CATALOG V2"],
             )
             self.assertEqual(
                 [v["publication_year"] for v in roundtrip["volumes"]],
@@ -171,11 +171,11 @@ class CsvV2RoundTripTests(unittest.TestCase):
                     tag_ids=[tag["id"]],
                 ),
                 edition=EditionInput(
-                    identifier="ISBN SET", version="Common Version",
+                    identifier="CATALOG SET", version="Common Version",
                     publisher="Raw Press", publisher_id=normalized["id"],
                 ),
                 volume=VolumeInput(
-                    volume_number="1", identifier="ISBN V1",
+                    volume_number="1", identifier="CATALOG V1",
                     version="Volume One Version", publication_year=2001,
                     responsibility="Editor One",
                 ),
@@ -190,11 +190,11 @@ class CsvV2RoundTripTests(unittest.TestCase):
                     tag_ids=[tag["id"]],
                 ),
                 edition=EditionInput(
-                    identifier="ISBN SET", version="Common Version",
+                    identifier="CATALOG SET", version="Common Version",
                     publisher="Raw Press", publisher_id=normalized["id"],
                 ),
                 volume=VolumeInput(
-                    volume_number="2", identifier="ISBN V2",
+                    volume_number="2", identifier="CATALOG V2",
                     version="Volume Two Version", publication_year=2002,
                     responsibility="Editor Two",
                 ),
@@ -220,14 +220,14 @@ class CsvV2RoundTripTests(unittest.TestCase):
             self.assertEqual(len({book["volume_id"] for book in books}), 2)
             self.assertEqual(len(books), 3)
             self.assertEqual(
-                {book["edition"]["identifier"] for book in books}, {"ISBN SET"}
+                {book["edition"]["identifier"] for book in books}, {"CATALOG SET"}
             )
             by_volume = {
                 book["volume"]["volume_number"]: book["volume"]
                 for book in books
             }
-            self.assertEqual(by_volume["1"]["identifier"], "ISBN V1")
-            self.assertEqual(by_volume["2"]["identifier"], "ISBN V2")
+            self.assertEqual(by_volume["1"]["identifier"], "CATALOG V1")
+            self.assertEqual(by_volume["2"]["identifier"], "CATALOG V2")
             self.assertEqual(by_volume["1"]["publication_year"], 2001)
             self.assertEqual(by_volume["2"]["publication_year"], 2002)
             self.assertEqual(by_volume["1"]["responsibility"], "Editor One")
@@ -243,20 +243,20 @@ class CsvV2RoundTripTests(unittest.TestCase):
         legacy = (
             "title,authors,identifier,volume_number,volume_title,"
             "copy_identifier,location,acquisition_date,reading_record\n"
-            "Legacy Book,Legacy Author,ISBN SET,1,First,"
-            "ISBN VOLUME,Shelf,2020-01-02,Read\n"
+            "Legacy Book,Legacy Author,CATALOG SET,1,First,"
+            "CATALOG VOLUME,Shelf,2020-01-02,Read\n"
         ).encode()
         with patch.dict(os.environ, {"LIBRARY_DATABASE": str(self.target)}):
             initialize()
             rows = preview_csv(legacy)
             self.assertEqual(
-                rows[0]["book"]["volume"]["identifier"], "ISBN VOLUME"
+                rows[0]["book"]["volume"]["identifier"], "CATALOG VOLUME"
             )
             self.assertNotIn("identifier", rows[0]["book"]["copy"])
             import_all(rows)
             book = list_books()[0]
-            self.assertEqual(book["edition"]["identifier"], "ISBN SET")
-            self.assertEqual(book["volume"]["identifier"], "ISBN VOLUME")
+            self.assertEqual(book["edition"]["identifier"], "CATALOG SET")
+            self.assertEqual(book["volume"]["identifier"], "CATALOG VOLUME")
             self.assertEqual(book["copy"]["location"], "Shelf")
             self.assertEqual(book["copy"]["reading_record"], "Read")
 
@@ -289,7 +289,7 @@ class FourLayerApiTests(unittest.TestCase):
                 record = add_book(BookInput(
                     work=WorkInput(title="API Book", authors="Author"),
                     edition=EditionInput(
-                        identifier="ISBN SET", version="Common", publisher="Press",
+                        identifier="CATALOG SET", version="Common", publisher="Press",
                     ),
                     volume=VolumeInput(volume_number="1"),
                     copy=CopyInput(location="Shelf A"),
@@ -308,7 +308,7 @@ class FourLayerApiTests(unittest.TestCase):
                 volume_2 = VolumeDetail.model_validate(add_volume(
                     edition_id,
                     VolumeInput(
-                        volume_number="2", identifier="ISBN V2",
+                        volume_number="2", identifier="CATALOG V2",
                         version="Volume Version", publication_year=2002,
                         responsibility="Editor",
                     ),
@@ -316,7 +316,7 @@ class FourLayerApiTests(unittest.TestCase):
                 duplicate_shape = VolumeDetail.model_validate(add_volume(
                     edition_id,
                     VolumeInput(
-                        volume_number="2", identifier="ISBN V2",
+                        volume_number="2", identifier="CATALOG V2",
                         version="Volume Version", publication_year=2002,
                         responsibility="Editor",
                     ),
@@ -330,13 +330,13 @@ class FourLayerApiTests(unittest.TestCase):
                 updated_volume = VolumeDetail.model_validate(edit_volume(
                     volume_2.id,
                     VolumeInput(
-                        volume_number="2", identifier="ISBN V2 revised",
+                        volume_number="2", identifier="CATALOG V2 revised",
                         version="Volume Version", publication_year=2003,
                         responsibility="Editor",
                     ),
                 ))
                 self.assertEqual(
-                    updated_volume.volume.identifier, "ISBN V2 revised"
+                    updated_volume.volume.identifier, "CATALOG V2 revised"
                 )
                 updated_copy = CopyDetail.model_validate(edit_copy(
                     copy_2.id,
@@ -347,7 +347,7 @@ class FourLayerApiTests(unittest.TestCase):
 
                 compatibility = api_book(copy_2.id)
                 self.assertEqual(
-                    compatibility["volume"]["identifier"], "ISBN V2 revised"
+                    compatibility["volume"]["identifier"], "CATALOG V2 revised"
                 )
                 self.assertEqual(api_copy(copy_id)["volume_id"], volume_id)
 

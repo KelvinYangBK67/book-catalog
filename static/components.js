@@ -11,6 +11,7 @@ export function actionMenu(layer, id, items) {
 
 function hasValue(control) {
   if (control.disabled || control.type === 'hidden' || control.type === 'radio') return false;
+  if (control.closest('.edition-work-link-row[data-implicit-work="true"]')) return false;
   if (control.type === 'checkbox') return control.checked;
   if (control.multiple) return Array.from(control.selectedOptions).some((option) => option.value);
   return String(control.value || '').trim() !== '';

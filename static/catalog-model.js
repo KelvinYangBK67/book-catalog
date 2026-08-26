@@ -12,10 +12,16 @@ export function editionRelations(edition) {
 export function groupedVolumes(group) {
   return (group.volumes || []).map((item) => (
     item.volume ? {id: item.id, ...item.volume, copies: item.copies || []} : item
-  )).sort((left, right) =>
-    (left.position ?? 0) - (right.position ?? 0)
-    || naturalVolumeCompare(left.volume_number || '', right.volume_number || '')
-  );
+  )).sort((left, right) => {
+    const leftNumber = String(left.volume_number || '').trim();
+    const rightNumber = String(right.volume_number || '').trim();
+    if (leftNumber && rightNumber) {
+      return naturalVolumeCompare(leftNumber, rightNumber)
+        || (left.position ?? 0) - (right.position ?? 0);
+    }
+    if (Boolean(leftNumber) !== Boolean(rightNumber)) return leftNumber ? -1 : 1;
+    return (left.position ?? 0) - (right.position ?? 0);
+  });
 }
 
 export function groupCopies(group) {

@@ -33,6 +33,57 @@ def normalize_version_text(value: object) -> object:
     )
 
 
+def _compact_isbn(value: str) -> str:
+    return re.sub(r"[\s-]", "", value).upper()
+
+
+def _valid_isbn10(value: str) -> bool:
+    if not re.fullmatch(r"\d{9}[\dX]", value):
+        return False
+    digits = [int(character) for character in value[:9]]
+    check = 10 if value[-1] == "X" else int(value[-1])
+    return (sum((10 - index) * digit for index, digit in enumerate(digits)) + check) % 11 == 0
+
+
+def _isbn10_as_isbn13(value: str) -> str:
+    first_twelve = "978" + value[:9]
+    weighted = sum(
+        int(digit) * (1 if index % 2 == 0 else 3)
+        for index, digit in enumerate(first_twelve)
+    )
+    return first_twelve + str((10 - weighted % 10) % 10)
+
+
+def _valid_isbn13(value: str) -> bool:
+    if not re.fullmatch(r"97[89]\d{10}", value):
+        return False
+    weighted = sum(
+        int(digit) * (1 if index % 2 == 0 else 3)
+        for index, digit in enumerate(value[:12])
+    )
+    return (10 - weighted % 10) % 10 == int(value[-1])
+
+
+def _canonical_isbn(value: str, *, explicit: bool) -> str | None:
+    compact = _compact_isbn(value)
+    isbn_shape = bool(
+        re.fullmatch(r"\d{9}[\dX]", compact)
+        or re.fullmatch(r"\d{13}", compact)
+    )
+    if not isbn_shape:
+        if explicit:
+            raise ValueError("ISBN 格式無效；請輸入有效的 ISBN-10 或 ISBN-13")
+        return None
+    if len(compact) == 10:
+        if _valid_isbn10(compact):
+            return _isbn10_as_isbn13(compact)
+    elif _valid_isbn13(compact):
+        return compact
+    if explicit:
+        raise ValueError("ISBN 校驗碼不正確")
+    return None
+
+
 def normalize_identifier_text(value: object) -> object:
     normalized = normalize_semicolon_text(value)
     if not isinstance(normalized, str) or not normalized:
@@ -53,8 +104,10 @@ def normalize_identifier_text(value: object) -> object:
         if explicit:
             kind = explicit.group(1).upper()
             content = explicit.group(2).strip()
-        elif re.match(r'^(?:97[89][\d\s-]*|\d[\d\s-]{8,}[\dXx])(?:\b|/)', part):
-            kind, content = 'ISBN', part
+            if kind == 'ISBN':
+                content = _canonical_isbn(content, explicit=True)
+        elif (canonical_isbn := _canonical_isbn(part, explicit=False)) is not None:
+            kind, content = 'ISBN', canonical_isbn
         elif re.match(r'^(?:統一書號|统一书号|書號|书号)\s*[:：]?\s*', part):
             match = re.match(
                 r'^(統一書號|统一书号|書號|书号)\s*[:：]?\s*(.*)$', part

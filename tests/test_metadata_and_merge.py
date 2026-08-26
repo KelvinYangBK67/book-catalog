@@ -25,7 +25,7 @@ def book(title: str, volume_number: str, volume_version: str) -> BookInput:
             edition_scripts="Chinese",
             translator="Alice (translator)",
             publisher="Press",
-            identifier="ISBN SET",
+            identifier="CATALOG SET",
         ),
         volume=VolumeInput(
             volume_number=volume_number,
@@ -48,7 +48,7 @@ class ResolverTests(unittest.TestCase):
             {
                 "title": "Edition title",
                 "subtitle": "",
-                "identifier": "ISBN SET",
+                "identifier": "CATALOG SET",
                 "version": "First edition",
                 "publication_year": 2001,
                 "publication_year_end": None,
@@ -58,7 +58,7 @@ class ResolverTests(unittest.TestCase):
             },
             {
                 "volume_title": "",
-                "identifier": "ISBN V2",
+                "identifier": "CATALOG V2",
                 "version": "Second edition",
                 "publication_year": 2003,
                 "publication_year_end": None,
@@ -69,7 +69,7 @@ class ResolverTests(unittest.TestCase):
         self.assertEqual(resolved["title"], {"value": "Edition title", "source": "edition"})
         self.assertEqual(resolved["subtitle"], {"value": "Work subtitle", "source": "work"})
         self.assertEqual(resolved["scripts"], {"value": "Latin", "source": "volume"})
-        self.assertEqual(resolved["identifier"], {"value": "ISBN V2", "source": "volume"})
+        self.assertEqual(resolved["identifier"], {"value": "CATALOG V2", "source": "volume"})
         self.assertEqual(resolved["version"], {"value": "Second edition", "source": "volume"})
         self.assertEqual(resolved["publication_year"], {"value": 2003, "source": "volume"})
         self.assertEqual(
@@ -87,6 +87,24 @@ class ResolverTests(unittest.TestCase):
         )
         self.assertEqual(resolved["scripts"], {"value": "Tibetan", "source": "work"})
 
+    def test_translation_identity_precedes_parallel_edition_identity(self) -> None:
+        resolved = resolve_metadata(
+            {"title": "Original work", "subtitle": "Original subtitle"},
+            {
+                "title": "Parallel edition title",
+                "subtitle": "Parallel edition subtitle",
+                "translated_title": "Translated title",
+                "translated_subtitle": "Translated subtitle",
+            },
+            {},
+        )
+        self.assertEqual(
+            resolved["title"], {"value": "Translated title", "source": "edition"}
+        )
+        self.assertEqual(
+            resolved["subtitle"], {"value": "Translated subtitle", "source": "edition"}
+        )
+
 
 class MatchingTests(unittest.TestCase):
     def test_matching_is_pure_and_ignores_volume_level_differences(self) -> None:
@@ -94,11 +112,11 @@ class MatchingTests(unittest.TestCase):
             "id": 1, "title": "Edition", "subtitle": "",
             "edition_scripts": "Chinese", "translator": "Translator",
             "version": "", "series": "", "publisher_id": 7,
-            "identifier": "ISBN A", "publication_year": 2001,
+            "identifier": "CATALOG A", "publication_year": 2001,
             "force_separate": 0,
         }
         incoming = {
-            **candidate, "id": 2, "identifier": "ISBN B",
+            **candidate, "id": 2, "identifier": "CATALOG B",
             "publication_year": 2003,
         }
         before_candidate = copy.deepcopy(candidate)
@@ -143,7 +161,7 @@ class RepositorySemanticsTests(unittest.TestCase):
             ["volume", "volume"],
         )
         self.assertTrue(all(
-            item["effective_metadata"]["identifier"]["value"] == "ISBN SET"
+            item["effective_metadata"]["identifier"]["value"] == "CATALOG SET"
             and item["effective_metadata"]["identifier"]["source"] == "edition"
             for item in volumes
         ))
@@ -207,7 +225,7 @@ class MergeServiceTests(unittest.TestCase):
     def test_edition_merge_conflict_does_not_move_volumes(self) -> None:
         first = create_book(book("Edition conflict A", "1", ""), self.path)
         second_book = book("Edition conflict B", "1", "")
-        second_book.edition.identifier = "ISBN OTHER"
+        second_book.edition.identifier = "CATALOG OTHER"
         second = create_book(second_book, self.path)
         with self.assertRaises(MergeConflict):
             merge_editions(first["edition_id"], second["edition_id"], self.path)

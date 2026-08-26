@@ -145,12 +145,12 @@ class ImportAndNormalizationTests(unittest.TestCase):
 
     def test_csv_volume_identifier_coexists_with_edition_identifier(self) -> None:
         original_book = make_book()
-        original_book.edition.identifier = "ISBN SET"
+        original_book.edition.identifier = "CATALOG SET"
         create_book(original_book)
 
         rows = preview_csv(
             b"title,authors,identifier,version,series,publisher,volume,copy_identifier,location\n"
-            b"Shared Title,Shared Author,ISBN SET,2,Collected Works,Raw Press,2,ISBN VOLUME-2,Shelf B\n"
+            b"Shared Title,Shared Author,CATALOG SET,2,Collected Works,Raw Press,2,CATALOG VOLUME-2,Shelf B\n"
         )
         imported = BookInput.model_validate(rows[0]["book"])
         csv_import(CsvImportCommit(rows=[CsvImportSelection(
@@ -162,10 +162,10 @@ class ImportAndNormalizationTests(unittest.TestCase):
 
         books = list_books()
         self.assertEqual(len(books), 2)
-        self.assertEqual({book["edition"]["identifier"] for book in books}, {"ISBN SET"})
+        self.assertEqual({book["edition"]["identifier"] for book in books}, {"CATALOG SET"})
         self.assertEqual(
             {book["volume"]["identifier"] for book in books},
-            {"", "ISBN VOLUME-2"},
+            {"", "CATALOG VOLUME-2"},
         )
 
     def test_csv_can_overwrite_an_existing_copy(self) -> None:
@@ -198,7 +198,7 @@ class ImportAndNormalizationTests(unittest.TestCase):
                 tag_names=['Old tag'],
             ),
             edition=EditionInput(
-                identifier='ISBN 123', translator='Translator', series='Series',
+                identifier='CATALOG 123', translator='Translator', series='Series',
                 publisher='Press', publication_year=2020,
             ),
             volume=VolumeInput(volume_number='1'),

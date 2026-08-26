@@ -9,6 +9,8 @@ from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
 
+from pydantic import ValidationError
+
 from app.database import initialize
 from app.export import export_csv, export_json
 from app.repository import create_book, create_tag, get_work, list_works, update_tag
@@ -49,7 +51,7 @@ class ListNormalizationTests(unittest.TestCase):
         )
         self.assertEqual(
             edition.identifier,
-            'ISBN 978-0-19-005260-7; ISSN 0169-8524',
+            'ISBN 9780190052607; ISSN 0169-8524',
         )
         self.assertEqual(
             EditionInput(identifier='統一書號：2018·204').identifier,
@@ -59,11 +61,38 @@ class ListNormalizationTests(unittest.TestCase):
             EditionInput(
                 identifier='ISBN 978-7-5600-3007-4; ISBN 978-7-5600-3319-8'
             ).identifier,
-            'ISBN 978-7-5600-3007-4; ISBN 978-7-5600-3319-8',
+            'ISBN 9787560030074; ISBN 9787560033198',
         )
         self.assertEqual(
             EditionInput(identifier='識別號 識別號 书号 10019·1998').identifier,
             '书号 10019·1998',
+        )
+
+    def test_isbn_checksum_and_canonicalization(self) -> None:
+        for value in ('0-306-40615-2', '0306406152', 'ISBN 0-306-40615-2'):
+            self.assertEqual(
+                EditionInput(identifier=value).identifier,
+                'ISBN 9780306406157',
+            )
+        self.assertEqual(
+            EditionInput(identifier='ISBN 0-8044-2957-X').identifier,
+            'ISBN 9780804429573',
+        )
+        self.assertEqual(
+            EditionInput(identifier='ISBN 979-10-90636-07-1').identifier,
+            'ISBN 9791090636071',
+        )
+        with self.assertRaisesRegex(ValidationError, 'ISBN 校驗碼不正確'):
+            EditionInput(identifier='ISBN 9780306406158')
+        self.assertEqual(
+            EditionInput(identifier='9780306406158').identifier,
+            '識別號 9780306406158',
+        )
+        self.assertEqual(
+            EditionInput(
+                identifier='ISBN 0-306-40615-2; ISSN 0169-8524; LCCN 2001012345'
+            ).identifier,
+            'ISBN 9780306406157; ISSN 0169-8524; LCCN 2001012345',
         )
         self.assertEqual(
             EditionInput(identifier='书号 10019·1998').identifier,
@@ -103,10 +132,10 @@ class ExportTests(unittest.TestCase):
                         scripts="Tibetan; Chinese", tag_ids=[tag["id"]],
                     ),
                     edition=EditionInput(
-                        identifier="ISSN 1234-5678; ISBN 978-1-2-3 (pbk.)",
+                        identifier="ISSN 1234-5678; ISBN 9780306406157 (pbk.)",
                         version="2; Revised", publisher="Test Press",
                     ),
-                    volume=VolumeInput(identifier="ISBN 978-1-2-4"),
+                    volume=VolumeInput(identifier="ISBN 9783161484100"),
                     copy=CopyInput(location="Study", reading_record="Read"),
                 ))
 
@@ -122,10 +151,10 @@ class ExportTests(unittest.TestCase):
             )
             self.assertEqual(
                 exported["editions"][0]["identifier"],
-                "ISSN 1234-5678; ISBN 978-1-2-3",
+                "ISSN 1234-5678; ISBN 9780306406157",
             )
             self.assertEqual(
-                exported["volumes"][0]["identifier"], "ISBN 978-1-2-4"
+                exported["volumes"][0]["identifier"], "ISBN 9783161484100"
             )
             self.assertEqual(exported["copies"][0]["reading_record"], "Read")
 
@@ -136,9 +165,9 @@ class ExportTests(unittest.TestCase):
             self.assertEqual(row["schema_version"], "2")
             self.assertEqual(row["work_title"], "Export Test")
             self.assertEqual(
-                row["edition_identifier"], "ISSN 1234-5678; ISBN 978-1-2-3"
+                row["edition_identifier"], "ISSN 1234-5678; ISBN 9780306406157"
             )
-            self.assertEqual(row["volume_identifier"], "ISBN 978-1-2-4")
+            self.assertEqual(row["volume_identifier"], "ISBN 9783161484100")
             self.assertEqual(row["copy_location"], "Study")
             self.assertEqual(row["copy_reading_record"], "Read")
             self.assertNotIn("copy_identifier", row)

@@ -118,13 +118,13 @@ def resolve_metadata(work: Any, edition: Any, volume: Any) -> dict[str, Any]:
     """Resolve effective bibliographic metadata without mutating any input."""
     title = resolve_override((
         ("volume", _value(volume, "volume_title")),
-        ("edition", _value(edition, "title")),
         ("edition", _value(edition, "translated_title")),
+        ("edition", _value(edition, "title")),
         ("work", _value(work, "title")),
     ))
     subtitle = resolve_override((
-        ("edition", _value(edition, "subtitle")),
         ("edition", _value(edition, "translated_subtitle")),
+        ("edition", _value(edition, "subtitle")),
         ("work", _value(work, "subtitle")),
     ))
     scripts = resolve_override((

@@ -85,8 +85,9 @@
       <fieldset class="form-section quick-entry-section">
         <legend>快速錄入</legend>
         <div class="form-grid">
-          <label class="span-12">題名 <em>必填</em><input name="work.title" required maxlength="500"></label>
-          <label class="span-8">作者／主要責任人<input name="work.authors" maxlength="1000" placeholder="多項用半角分號 ; 分隔"></label>
+          <label class="span-7">題名 <em>必填</em><input name="work.title" required maxlength="500"></label>
+          <label class="span-5">副題名<input name="work.subtitle" maxlength="500"></label>
+          <label class="span-8">作者或主要責任人<input name="work.authors" maxlength="1000" placeholder="多項用半角分號 ; 分隔"></label>
           <label class="span-4">文種<input name="work.scripts" maxlength="500" placeholder="藏文; 漢文"></label>
           <div class="span-12 tag-picker" data-tag-picker>
             <span class="field-label">標籤</span>
@@ -100,36 +101,31 @@
           </div>
           <label class="span-6">出版社<input name="edition.publisher" maxlength="500" list="publisher-suggestions"></label>
           <datalist id="publisher-suggestions"></datalist>
-          <label class="span-6">藏書位置<input name="copy.location" maxlength="500" placeholder="例如：書房 A 架 2 層"></label>
         </div>
       </fieldset>
 
       <details class="form-disclosure" data-disclosure>
-        <summary><span data-disclosure-label data-label="更多作品資料">更多作品資料</span></summary>
-        <div class="form-grid disclosure-fields">
-          <label class="span-12">副題名<input name="work.subtitle" maxlength="500"></label>
-        </div>
-      </details>
-
-      <details class="form-disclosure" data-disclosure>
         <summary><span data-disclosure-label data-label="更多版本資料">更多版本資料</span></summary>
         <div class="form-grid disclosure-fields">
-          <label class="span-2">出版年份<input name="edition.publication_year" inputmode="numeric" maxlength="9" placeholder="2002"></label>
-          <label class="span-3">版本<input name="edition.version" maxlength="200" placeholder="第2版"></label>
-          <label class="span-12">ISBN／識別號<input name="edition.identifier" maxlength="1000" placeholder="ISBN 978-…；多項用半角分號 ; 分隔"></label>
-          <label class="span-7">版本題名<input name="edition.title" maxlength="500" placeholder="留空繼承作品題名"></label>
-          <label class="span-5">版本副題名<input name="edition.subtitle" maxlength="500"></label>
-          <label class="span-6">系列<input name="edition.series" maxlength="500"></label>
-          <label class="span-4">版本文種<input name="edition.edition_scripts" maxlength="500" placeholder="留空繼承作品"></label>
-          <label class="span-8">版本責任人<input name="edition.responsibility" maxlength="1000" placeholder="多項用半角分號 ; 分隔"></label>
           <label class="span-12 checkbox-option translation-toggle">
             <input type="checkbox" data-translation-toggle> 此版本為譯本
           </label>
-          <div class="span-12 form-grid translation-fields" data-translation-fields hidden>
-            <label class="span-7">翻譯題名<input name="edition.translated_title" maxlength="500"></label>
-            <label class="span-5">翻譯副題名<input name="edition.translated_subtitle" maxlength="500"></label>
-            <label class="span-8">譯者／翻譯相關責任人<input name="edition.translator" maxlength="500"></label>
+          <label class="span-2">出版年份<input name="edition.publication_year" inputmode="numeric" maxlength="9" placeholder="2002"></label>
+          <label class="span-3">版本<input name="edition.version" maxlength="200" placeholder="第2版"></label>
+          <label class="span-7">系列<input name="edition.series" maxlength="500"></label>
+          <label class="span-12">ISBN 或識別號<input name="edition.identifier" maxlength="1000" placeholder="ISBN 978-…; 多項用半角分號 ; 分隔"></label>
+          <div class="span-12 form-grid translation-identity" data-translation-identity data-translation-prefix="edition.">
+            <label class="span-7"><span data-identity-label="title">版本題名</span><input data-identity-control="title" maxlength="500" placeholder="留空繼承作品題名"></label>
+            <label class="span-5"><span data-identity-label="subtitle">版本副題名</span><input data-identity-control="subtitle" maxlength="500"></label>
+            <label class="span-7"><span data-identity-label="responsibility">版本責任人</span><input data-identity-control="responsibility" maxlength="1000" placeholder="多項用半角分號 ; 分隔"></label>
+            <label class="span-4"><span data-identity-label="scripts">版本文種</span><input name="edition.edition_scripts" data-identity-control="scripts" maxlength="500" placeholder="留空繼承作品"></label>
           </div>
+          <input type="hidden" name="edition.title">
+          <input type="hidden" name="edition.subtitle">
+          <input type="hidden" name="edition.responsibility">
+          <input type="hidden" name="edition.translated_title">
+          <input type="hidden" name="edition.translated_subtitle">
+          <input type="hidden" name="edition.translator">
           <div class="span-12 paired-title-editor" data-paired-titles
                data-title-name="edition.other_title" data-subtitle-name="edition.other_subtitle">
             <span class="field-label">其他題名</span>
@@ -141,25 +137,29 @@
 
       <button class="repeatable-add add-volume-fields" type="button" data-add-volume-fields>＋ 新增冊</button>
       <section class="volume-form-fields" data-volume-form-fields hidden>
-        <label class="checkbox-option">
-          <input type="checkbox" data-volume-inherits checked> 此冊完全沿用版本資訊
-        </label>
+        <div class="volume-form-heading">
+          <label class="checkbox-option">
+            <input type="checkbox" data-volume-inherits checked> 此冊完全沿用版本資訊
+          </label>
+          <button class="quiet-button remove-unsaved-volume" type="button" data-remove-volume-fields>移除冊</button>
+        </div>
         <div class="form-grid">
-          <label class="span-2" data-single-volume>冊號<input name="volume.volume_number" maxlength="100" placeholder="1.2.3"></label>
-          <label class="span-8" data-single-volume>冊名<input name="volume.volume_title" maxlength="500"></label>
+          <label class="span-3" data-single-volume>冊號<input name="volume.volume_number" maxlength="100" placeholder="1.2.3"></label>
+          <label class="span-9" data-single-volume>冊名<input name="volume.volume_title" maxlength="500"></label>
         </div>
         <div class="form-grid volume-override-fields" data-volume-override-fields hidden>
           <label class="span-12">冊級識別號<input name="volume.identifier" maxlength="1000" placeholder="留空繼承版本識別號"></label>
           <label class="span-3">冊級版本<input name="volume.version" maxlength="200"></label>
-          <label class="span-2">冊級出版年份<input name="volume.publication_year" inputmode="numeric" maxlength="9"></label>
-          <label class="span-8">冊級責任人<input name="volume.responsibility" maxlength="1000" placeholder="會附加到版本責任人"></label>
+          <label class="span-3">冊級出版年份<input name="volume.publication_year" inputmode="numeric" maxlength="9"></label>
+          <label class="span-6">冊級責任人<input name="volume.responsibility" maxlength="1000" placeholder="會附加到版本責任人"></label>
         </div>
       </section>
 
       <details class="form-disclosure" data-disclosure>
         <summary><span data-disclosure-label data-label="其他館藏資料">其他館藏資料</span></summary>
         <div class="form-grid disclosure-fields">
-          <label class="span-3">取得日期<input name="copy.acquisition_date" type="date"></label>
+          <label class="span-8">藏書位置<input name="copy.location" maxlength="500" placeholder="例如：書房 A 架 2 層"></label>
+          <label class="span-4">取得日期<input name="copy.acquisition_date" type="date"></label>
           <label class="span-12">閱讀記錄<textarea name="copy.reading_record" maxlength="5000" rows="3"></textarea></label>
         </div>
       </details>
@@ -226,7 +226,6 @@
   <dialog id="detail-dialog" class="dialog detail-dialog">
     <div class="dialog-header">
       <div class="detail-heading"><p class="eyebrow">藏書詳情</p><h2 id="detail-title"></h2><p id="detail-subtitle" hidden></p></div>
-      <div id="detail-header-actions" class="detail-header-actions"></div>
       <button class="icon-button" aria-label="關閉" type="button" data-detail-close>×</button>
     </div>
     <div id="detail-content"></div>
@@ -239,8 +238,9 @@
     <form id="work-edit-form">
       <div class="dialog-header"><div><p class="eyebrow" id="work-form-mode">修改作品</p><h2 id="work-form-title">修改作品</h2></div><button class="icon-button" type="button" data-work-edit-close>×</button></div>
       <fieldset><div class="form-grid">
-        <label class="span-12">題名 <em>必填</em><input name="title" required maxlength="500"></label>
-        <label class="span-8">作者／主要責任人<input name="authors" maxlength="1000" placeholder="多項用半角分號 ; 分隔"></label>
+        <label class="span-7">題名 <em>必填</em><input name="title" required maxlength="500"></label>
+        <label class="span-5">副題名<input name="subtitle" maxlength="500"></label>
+        <label class="span-8">作者或主要責任人<input name="authors" maxlength="1000" placeholder="多項用半角分號 ; 分隔"></label>
         <label class="span-4">文種<input name="scripts" maxlength="500" placeholder="多項用半角分號 ; 分隔"></label>
         <div class="span-12 tag-picker" data-tag-picker>
           <span class="field-label">標籤</span>
@@ -253,16 +253,15 @@
           <select class="tag-id-store" name="tag_ids" multiple hidden></select>
           <input class="tag-name-store" name="tag_names" type="hidden">
         </div>
-        <label class="span-12">副題名<input name="subtitle" maxlength="500"></label>
         <details class="span-12 form-disclosure" data-disclosure>
           <summary><span data-disclosure-label data-label="進階結構">進階結構</span></summary>
           <div class="work-edition-links disclosure-fields" data-work-edition-links>
           <span class="field-label">關聯已有版本</span>
           <small class="field-help">可同時填寫多個條件縮小候選；留空搜尋則瀏覽既有版本。</small>
           <div class="relation-search-grid">
-            <input data-edition-search-title placeholder="版本題名／翻譯題名">
+            <input data-edition-search-title placeholder="版本題名或翻譯題名">
             <input data-edition-search-subtitle placeholder="副標題">
-            <input data-edition-search-identifier placeholder="ISBN／識別號">
+            <input data-edition-search-identifier placeholder="ISBN 或識別號">
             <input data-edition-search-publisher placeholder="出版社">
             <input data-edition-search-year inputmode="numeric" placeholder="出版年">
             <button class="secondary" type="button" data-search-edition>搜尋版本</button>
@@ -284,22 +283,25 @@
         <details class="span-12 form-disclosure" data-disclosure>
           <summary><span data-disclosure-label data-label="更多版本資料">更多版本資料</span></summary>
           <div class="form-grid disclosure-fields">
-            <label class="span-2">出版年份<input name="publication_year" inputmode="numeric" maxlength="9" placeholder="例如：2002 或 2002–2003"></label>
-            <label class="span-3">版本<input name="version" maxlength="200" placeholder="多項用半角分號 ; 分隔"></label>
-            <label class="span-12">ISBN／識別號<input name="identifier" maxlength="1000" placeholder="多項用半角分號 ; 分隔"></label>
-            <label class="span-7">版本題名<input name="title" maxlength="500" placeholder="留空繼承作品題名"></label>
-            <label class="span-5">版本副題名<input name="subtitle" maxlength="500"></label>
-            <label class="span-6">系列<input name="series" maxlength="500" placeholder="多項用半角分號 ; 分隔"></label>
-            <label class="span-4">版本文種<input name="edition_scripts" maxlength="500" placeholder="留空繼承作品文種"></label>
-            <label class="span-8">版本責任人<input name="responsibility" maxlength="1000" placeholder="多項用半角分號 ; 分隔"></label>
             <label class="span-12 checkbox-option translation-toggle">
               <input type="checkbox" data-translation-toggle> 此版本為譯本
             </label>
-            <div class="span-12 form-grid translation-fields" data-translation-fields hidden>
-              <label class="span-7">翻譯題名<input name="translated_title" maxlength="500"></label>
-              <label class="span-5">翻譯副題名<input name="translated_subtitle" maxlength="500"></label>
-              <label class="span-8">譯者／翻譯相關責任人<input name="translator" maxlength="500" placeholder="多項用半角分號 ; 分隔"></label>
+            <label class="span-2">出版年份<input name="publication_year" inputmode="numeric" maxlength="9" placeholder="例如：2002 或 2002–2003"></label>
+            <label class="span-3">版本<input name="version" maxlength="200" placeholder="多項用半角分號 ; 分隔"></label>
+            <label class="span-7">系列<input name="series" maxlength="500" placeholder="多項用半角分號 ; 分隔"></label>
+            <label class="span-12">ISBN 或識別號<input name="identifier" maxlength="1000" placeholder="多項用半角分號 ; 分隔"></label>
+            <div class="span-12 form-grid translation-identity" data-translation-identity data-translation-prefix="">
+              <label class="span-7"><span data-identity-label="title">版本題名</span><input data-identity-control="title" maxlength="500" placeholder="留空繼承作品題名"></label>
+              <label class="span-5"><span data-identity-label="subtitle">版本副題名</span><input data-identity-control="subtitle" maxlength="500"></label>
+              <label class="span-7"><span data-identity-label="responsibility">版本責任人</span><input data-identity-control="responsibility" maxlength="1000" placeholder="多項用半角分號 ; 分隔"></label>
+              <label class="span-4"><span data-identity-label="scripts">版本文種</span><input name="edition_scripts" data-identity-control="scripts" maxlength="500" placeholder="留空繼承作品文種"></label>
             </div>
+            <input type="hidden" name="title">
+            <input type="hidden" name="subtitle">
+            <input type="hidden" name="responsibility">
+            <input type="hidden" name="translated_title">
+            <input type="hidden" name="translated_subtitle">
+            <input type="hidden" name="translator">
             <div class="span-12 paired-title-editor" data-paired-titles
                  data-title-name="other_title" data-subtitle-name="other_subtitle">
               <span class="field-label">其他題名</span>
@@ -331,16 +333,16 @@
         <button class="icon-button" type="button" data-volume-edit-close aria-label="關閉">×</button>
       </div>
       <fieldset><div class="form-grid">
-        <label class="span-2">冊號<input name="volume_number" maxlength="100"></label>
-        <label class="span-8">冊名<input name="volume_title" maxlength="500"></label>
+        <label class="span-3">冊號<input name="volume_number" maxlength="100"></label>
+        <label class="span-9">冊名<input name="volume_title" maxlength="500"></label>
         <label class="span-12 checkbox-option">
           <input type="checkbox" data-volume-inherits checked> 此冊完全沿用版本資訊
         </label>
         <div class="span-12 form-grid volume-override-fields" data-volume-override-fields hidden>
           <label class="span-12">冊級識別號<input name="identifier" maxlength="1000"></label>
           <label class="span-3">冊級版本<input name="version" maxlength="200"></label>
-          <label class="span-2">冊級出版年份<input name="publication_year" inputmode="numeric" maxlength="9"></label>
-          <label class="span-8">冊級責任人<input name="responsibility" maxlength="1000"></label>
+          <label class="span-3">冊級出版年份<input name="publication_year" inputmode="numeric" maxlength="9"></label>
+          <label class="span-6">冊級責任人<input name="responsibility" maxlength="1000"></label>
         </div>
       </div></fieldset>
       <div class="dialog-actions">
@@ -356,8 +358,8 @@
         <button class="icon-button" type="button" data-copy-edit-close aria-label="關閉">×</button>
       </div>
       <fieldset><div class="form-grid">
-        <label class="span-6">藏書位置<input name="location" maxlength="500"></label>
-        <label class="span-3">取得日期<input name="acquisition_date" type="date"></label>
+        <label class="span-8">藏書位置<input name="location" maxlength="500"></label>
+        <label class="span-4">取得日期<input name="acquisition_date" type="date"></label>
         <label class="span-12">閱讀記錄<textarea name="reading_record" maxlength="5000" rows="3"></textarea></label>
       </div></fieldset>
       <div class="dialog-actions">

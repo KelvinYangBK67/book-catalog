@@ -245,7 +245,7 @@ class ReleaseCandidateAuditTests(unittest.TestCase):
             INSERT INTO editions
                 (id, work_id, isbn, translator, translation_script,
                  publisher, publisher_id, publication_year)
-                VALUES (1, 1, 'ISBN SET', 'Translator', '藏文',
+                VALUES (1, 1, 'CATALOG SET', 'Translator', '藏文',
                         'Legacy Press', 1, 2001);
             INSERT INTO edition_works
                 (edition_id, work_id, position, relation_type, volume_number)
@@ -253,9 +253,9 @@ class ReleaseCandidateAuditTests(unittest.TestCase):
                        (1, 2, 1, 'contained', '');
             INSERT INTO copies
                 (id, edition_id, volume_number, volume_title, identifier, location)
-                VALUES (1, 1, '1', 'First', 'ISBN V1', 'A'),
-                       (2, 1, '1', 'First', 'ISBN V1', 'B'),
-                       (3, 1, '2', 'Second', 'ISBN V2', 'C');
+                VALUES (1, 1, '1', 'First', 'CATALOG V1', 'A'),
+                       (2, 1, '1', 'First', 'CATALOG V1', 'B'),
+                       (3, 1, '2', 'Second', 'CATALOG V2', 'C');
             INSERT INTO tags (id, name, parent_id)
                 VALUES (1, 'History', NULL), (2, 'Tibet', 1);
             INSERT INTO work_tags (work_id, tag_id) VALUES (1, 2);
@@ -290,9 +290,9 @@ class ReleaseCandidateAuditTests(unittest.TestCase):
             self.assertNotEqual(copy_volume_ids[1][0], copy_volume_ids[2][0])
             self.assertEqual(
                 [tuple(row) for row in volumes],
-                [("1", "First", "ISBN V1"), ("2", "Second", "ISBN V2")],
+                [("1", "First", "CATALOG V1"), ("2", "Second", "CATALOG V2")],
             )
-            self.assertEqual(tuple(edition), ("ISBN SET", "藏文", 1))
+            self.assertEqual(tuple(edition), ("CATALOG SET", "藏文", 1))
             self.assertEqual(connection.execute("PRAGMA foreign_key_check").fetchall(), [])
             self.assertNotIn(
                 "work_id",
@@ -331,18 +331,18 @@ class ReleaseCandidateAuditTests(unittest.TestCase):
         initialize(self.path)
         first = create_book(book_payload(
             "Course",
-            edition_identifier="ISBN SET",
+            edition_identifier="CATALOG SET",
             volume_number="1",
-            volume_identifier="ISBN V1",
+            volume_identifier="CATALOG V1",
             volume_version="第2版",
             volume_year=2001,
             location="A",
         ), self.path)
         second = create_book(book_payload(
             "Course",
-            edition_identifier="ISBN SET",
+            edition_identifier="CATALOG SET",
             volume_number="2",
-            volume_identifier="ISBN V2",
+            volume_identifier="CATALOG V2",
             volume_version="第3版",
             volume_year=2002,
             volume_responsibility="Volume Editor",
@@ -358,7 +358,7 @@ class ReleaseCandidateAuditTests(unittest.TestCase):
         volumes = detail["editions"][0]["volumes"]
         self.assertEqual(
             [group["volume"]["identifier"] for group in volumes],
-            ["ISBN V1", "ISBN V2"],
+            ["CATALOG V1", "CATALOG V2"],
         )
         self.assertEqual(
             [group["volume"]["version"] for group in volumes],

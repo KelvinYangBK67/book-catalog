@@ -24,24 +24,27 @@ class FrontendStructureTests(unittest.TestCase):
     def test_quick_entry_contains_only_daily_fields(self) -> None:
         first_disclosure = HTML.index('<details class="form-disclosure"')
         for name in (
-            "work.title", "work.authors", "work.scripts", "work.tags",
-            "edition.publisher", "copy.location",
+            "work.title", "work.subtitle", "work.authors", "work.scripts",
+            "work.tags", "edition.publisher",
         ):
             self.assertLess(HTML.index(f'name="{name}"'), first_disclosure)
         for name in (
-            "work.subtitle", "edition.publication_year", "edition.version",
+            "edition.publication_year", "edition.version",
             "edition.identifier", "edition.title", "edition.subtitle",
             "edition.series", "edition.edition_scripts",
             "edition.responsibility", "edition.other_title",
-            "copy.acquisition_date", "copy.reading_record",
+            "copy.location", "copy.acquisition_date", "copy.reading_record",
         ):
             self.assertGreater(HTML.index(f'name="{name}"'), first_disclosure)
+        self.assertIn('class="span-7">題名', HTML)
+        self.assertIn('class="span-5">副題名', HTML)
 
     def test_low_frequency_fields_are_progressively_disclosed(self) -> None:
         for label in (
-            "更多作品資料", "更多版本資料", "其他館藏資料", "進階結構",
+            "更多版本資料", "其他館藏資料", "進階結構",
         ):
             self.assertIn(f'data-label="{label}"', HTML)
+        self.assertNotIn('data-label="更多作品資料"', HTML)
         self.assertIn('data-add-volume-fields>＋ 新增冊', HTML)
         self.assertIn('data-volume-form-fields hidden', HTML)
         self.assertIn('data-volume-inherits checked', HTML)
@@ -63,11 +66,26 @@ class FrontendStructureTests(unittest.TestCase):
 
     def test_translation_fields_are_conditional_and_responsibilities_are_separate(self) -> None:
         self.assertEqual(HTML.count("data-translation-toggle"), 2)
-        self.assertEqual(HTML.count("data-translation-fields hidden"), 2)
+        self.assertEqual(HTML.count("data-translation-identity"), 2)
+        self.assertEqual(HTML.count('data-identity-control="title"'), 2)
+        self.assertNotIn("data-translation-fields", HTML)
         self.assertIn('name="edition.responsibility"', HTML)
         self.assertIn('name="responsibility"', HTML)
         self.assertIn("responsibility: get('edition.responsibility')", JS)
+        self.assertIn("syncTranslationIdentity", JS)
+        self.assertIn("translationStoreName", JS)
         self.assertIn("updateTranslationFields", JS)
+
+    def test_regression_copy_volume_and_dialog_state_controls(self) -> None:
+        self.assertIn('data-remove-volume-fields', HTML)
+        self.assertIn("clearUnsavedVolumeFields", JS)
+        self.assertIn("bookDialog.scrollTop = 0", JS)
+        self.assertIn("setBookVolumeFieldsVisible(false)", JS)
+        self.assertIn("form.elements.namedItem('copy-mode').value = 'single'", JS)
+        self.assertIn("form.querySelector('[data-volume-inherits]').checked = true", JS)
+
+    def test_ui_copy_uses_no_full_width_slash(self) -> None:
+        self.assertNotIn("／", HTML + JS)
 
     def test_new_and_edit_forms_share_the_twelve_column_grid(self) -> None:
         for form_id in (
@@ -168,6 +186,18 @@ class FrontendStructureTests(unittest.TestCase):
         self.assertIn("edition-bibliography", edition_header)
         self.assertNotIn("edition-summary-identifiers", edition_header)
         self.assertNotIn("border-top", edition_header)
+        self.assertIn("editionSummaryData", JS)
+        self.assertIn("usedFields.has('translated_title')", JS)
+        self.assertNotIn("detail-header-actions", HTML + JS)
+        self.assertIn("work-summary-action-row", JS)
+
+    def test_volume_sort_prefers_natural_number_then_position(self) -> None:
+        sort_block = CATALOG_MODEL[CATALOG_MODEL.index("export function groupedVolumes"):]
+        natural_index = sort_block.index("naturalVolumeCompare")
+        position_index = sort_block.index("(left.position ?? 0)", natural_index)
+        self.assertLess(natural_index, position_index)
+        self.assertIn("if (leftNumber && rightNumber)", sort_block)
+        self.assertIn("if (Boolean(leftNumber) !== Boolean(rightNumber))", sort_block)
 
     def test_compact_and_mobile_layout_rules_exist(self) -> None:
         self.assertIn("min-height: 56px", CSS)
@@ -187,6 +217,11 @@ class FrontendStructureTests(unittest.TestCase):
         self.assertIn("font: 14px/1.5 var(--ui-font)", CSS)
         self.assertIn("min-height: 40px", CSS)
         self.assertIn("padding: 8px 10px", CSS)
+        self.assertIn("line-height: 1.55", CSS)
+        self.assertIn("grid-template-columns: 24px minmax(0, 1fr) auto", CSS)
+        self.assertIn("#publisher-normalize-form { align-items: start; }", CSS)
+        self.assertIn("list-style: none", CSS)
+        self.assertIn("BIBLIOGRAPHIC_SELECTOR", SPECIAL_TEXT)
 
     def test_home_is_tool_focused_and_mobile_actions_are_collapsed(self) -> None:
         self.assertIn('id="catalog-title">我的藏書', HTML)

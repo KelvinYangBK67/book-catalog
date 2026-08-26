@@ -100,7 +100,7 @@ class DatabaseMigrationTests(unittest.TestCase):
         )
         work_id = int(connection.execute("SELECT last_insert_rowid()").fetchone()[0])
         connection.execute(
-            "INSERT INTO editions (work_id, identifier) VALUES (?, 'ISBN SET')",
+            "INSERT INTO editions (work_id, identifier) VALUES (?, 'CATALOG SET')",
             (work_id,),
         )
         edition_id = int(connection.execute("SELECT last_insert_rowid()").fetchone()[0])
@@ -155,7 +155,7 @@ class DatabaseMigrationTests(unittest.TestCase):
             connection.executemany(
                 """INSERT INTO copies
                        (edition_id, volume_number, volume_title, identifier, location)
-                   VALUES (?, '2', 'Second', 'ISBN V2', ?)""",
+                   VALUES (?, '2', 'Second', 'CATALOG V2', ?)""",
                 [(edition_id, "Shelf A"), (edition_id, "Shelf B")],
             )
             connection.commit()
@@ -173,7 +173,7 @@ class DatabaseMigrationTests(unittest.TestCase):
 
             self.assertEqual(report["shared_volume_groups"], 1)
             self.assertEqual(len(volumes), 1)
-            self.assertEqual(volumes[0]["identifier"], "ISBN V2")
+            self.assertEqual(volumes[0]["identifier"], "CATALOG V2")
             self.assertEqual({copy["volume_id"] for copy in copies}, {volumes[0]["id"]})
             self.assertEqual([copy["location"] for copy in copies], ["Shelf A", "Shelf B"])
 
@@ -186,7 +186,7 @@ class DatabaseMigrationTests(unittest.TestCase):
                 """INSERT INTO copies
                        (edition_id, volume_number, identifier)
                    VALUES (?, '1', ?)""",
-                [(edition_id, "ISBN A"), (edition_id, "ISBN B")],
+                [(edition_id, "CATALOG A"), (edition_id, "CATALOG B")],
             )
             connection.commit()
             connection.close()
@@ -200,7 +200,7 @@ class DatabaseMigrationTests(unittest.TestCase):
             finally:
                 connection.close()
 
-            self.assertEqual(identifier, "ISBN A; ISBN B")
+            self.assertEqual(identifier, "CATALOG A; CATALOG B")
             self.assertEqual(len(report["identifier_conflicts"]), 1)
 
     def test_volume_relation_is_migrated_to_volume_id_foreign_key(self) -> None:
@@ -312,12 +312,12 @@ class RepositoryTests(unittest.TestCase):
     def test_multiple_volumes_have_independent_overrides(self) -> None:
         first = sample_book("Volume Overrides")
         first.volume = VolumeInput(
-            volume_number="1", identifier="ISBN V1", version="1",
+            volume_number="1", identifier="CATALOG V1", version="1",
             publication_year=2001, responsibility="Editor One",
         )
         second = sample_book("Volume Overrides")
         second.volume = VolumeInput(
-            volume_number="2", identifier="ISBN V2", version="2",
+            volume_number="2", identifier="CATALOG V2", version="2",
             publication_year=2002, responsibility="Editor Two",
         )
         first_record = create_book(first, self.path)
@@ -337,8 +337,8 @@ class RepositoryTests(unittest.TestCase):
                 for volume in volumes
             ],
             [
-                ("1", "ISBN V1", "第1版", 2001, "Editor One"),
-                ("2", "ISBN V2", "第2版", 2002, "Editor Two"),
+                ("1", "CATALOG V1", "第1版", 2001, "Editor One"),
+                ("2", "CATALOG V2", "第2版", 2002, "Editor Two"),
             ],
         )
 
@@ -484,12 +484,12 @@ class RepositoryTests(unittest.TestCase):
 
     def test_identifier_year_and_volume_do_not_split_an_edition(self) -> None:
         first = sample_book()
-        first.edition.identifier = "ISBN 111"
+        first.edition.identifier = "CATALOG 111"
         first.edition.version = "\u7b2c 2 \u7248"
         first.edition.publication_year = 2002
         first.volume.volume_number = "1"
         second = sample_book()
-        second.edition.identifier = "ISBN 222"
+        second.edition.identifier = "CATALOG 222"
         second.edition.version = "\u7b2c 2 \u7248"
         second.edition.publication_year = 2003
         second.volume.volume_number = "2"
@@ -501,7 +501,7 @@ class RepositoryTests(unittest.TestCase):
         assert detail is not None
         self.assertEqual(len(detail["editions"]), 1)
         edition = detail["editions"][0]
-        self.assertEqual(edition["edition"]["identifier"], "ISBN 111")
+        self.assertEqual(edition["edition"]["identifier"], "CATALOG 111")
         self.assertEqual(edition["edition"]["publication_year"], 2002)
         volumes = [group["volume"] for group in edition["volumes"]]
         self.assertEqual(
@@ -509,7 +509,7 @@ class RepositoryTests(unittest.TestCase):
         )
         self.assertEqual(
             [volume["effective_metadata"]["identifier"]["value"] for volume in volumes],
-            ["ISBN 111", "ISBN 222"],
+            ["CATALOG 111", "CATALOG 222"],
         )
         self.assertEqual(
             [volume["effective_metadata"]["publication_year"]["value"]
@@ -519,13 +519,13 @@ class RepositoryTests(unittest.TestCase):
 
     def test_volume_identifier_can_coexist_with_edition_identifier(self) -> None:
         first = sample_book("Volume identifiers coexist")
-        first.edition.identifier = "ISBN SET"
+        first.edition.identifier = "CATALOG SET"
         first.volume.volume_number = "1"
         inherited = create_book(first, self.path)
 
         second = sample_book("Volume identifiers coexist")
-        second.edition.identifier = "ISBN SET"
-        second.volume.identifier = "ISBN VOLUME-2"
+        second.edition.identifier = "CATALOG SET"
+        second.volume.identifier = "CATALOG VOLUME-2"
         second.volume.volume_number = "2"
         explicit = create_book(second, self.path)
 
@@ -533,19 +533,19 @@ class RepositoryTests(unittest.TestCase):
         explicit_record = get_book(explicit["id"], self.path)
         assert inherited_record is not None and explicit_record is not None
         self.assertEqual(inherited_record["volume"]["identifier"], "")
-        self.assertEqual(inherited_record["volume"]["effective_metadata"]["identifier"]["value"], "ISBN SET")
-        self.assertEqual(explicit_record["volume"]["identifier"], "ISBN VOLUME-2")
-        self.assertEqual(explicit_record["edition"]["identifier"], "ISBN SET")
+        self.assertEqual(inherited_record["volume"]["effective_metadata"]["identifier"]["value"], "CATALOG SET")
+        self.assertEqual(explicit_record["volume"]["identifier"], "CATALOG VOLUME-2")
+        self.assertEqual(explicit_record["edition"]["identifier"], "CATALOG SET")
 
     def test_edition_identifier_can_be_moved_explicitly_to_volume(self) -> None:
         first = sample_book("Volume identifier demotion")
-        first.edition.identifier = "ISBN SET"
+        first.edition.identifier = "CATALOG SET"
         first.volume.volume_number = "1"
         inherited = create_book(first, self.path)
 
         second = sample_book("Volume identifier demotion")
-        second.edition.identifier = "ISBN SET"
-        second.volume.identifier = "ISBN VOLUME-2"
+        second.edition.identifier = "CATALOG SET"
+        second.volume.identifier = "CATALOG VOLUME-2"
         second.volume.volume_number = "2"
         explicit = create_book(second, self.path)
 
@@ -556,31 +556,31 @@ class RepositoryTests(unittest.TestCase):
         inherited_record = get_book(inherited["id"], self.path)
         explicit_record = get_book(explicit["id"], self.path)
         assert inherited_record is not None and explicit_record is not None
-        self.assertEqual(inherited_record["volume"]["identifier"], "ISBN SET")
-        self.assertEqual(explicit_record["volume"]["identifier"], "ISBN VOLUME-2")
+        self.assertEqual(inherited_record["volume"]["identifier"], "CATALOG SET")
+        self.assertEqual(explicit_record["volume"]["identifier"], "CATALOG VOLUME-2")
         self.assertEqual(explicit_record["edition"]["identifier"], "")
 
     def test_editing_volume_identifier_does_not_mutate_edition_identifier(self) -> None:
         first = sample_book("Edit volume identifier")
-        first.edition.identifier = "ISBN SET"
+        first.edition.identifier = "CATALOG SET"
         first.volume.volume_number = "1"
         create_book(first, self.path)
         second = sample_book("Edit volume identifier")
-        second.edition.identifier = "ISBN SET"
+        second.edition.identifier = "CATALOG SET"
         second.volume.volume_number = "2"
         second_record = create_book(second, self.path)
 
         changed = update_volume_details(
             second_record["volume_id"],
-            VolumeInput(volume_number="2", identifier="ISBN VOLUME-2"),
+            VolumeInput(volume_number="2", identifier="CATALOG VOLUME-2"),
             self.path,
         )
         self.assertIsNotNone(changed)
         books = list_books(path=self.path)
-        self.assertEqual({book["edition"]["identifier"] for book in books}, {"ISBN SET"})
+        self.assertEqual({book["edition"]["identifier"] for book in books}, {"CATALOG SET"})
         self.assertEqual(
             {book["volume"]["identifier"] for book in books},
-            {"", "ISBN VOLUME-2"},
+            {"", "CATALOG VOLUME-2"},
         )
 
     def test_shared_identifier_does_not_override_different_version(self) -> None:
@@ -842,7 +842,7 @@ class RepositoryTests(unittest.TestCase):
         book = sample_book()
         book.edition.version = "珍藏版"
         book.edition.translated_subtitle = "魔幻家族史"
-        book.volume.identifier = "ISBN COPY-UNIQUE"
+        book.volume.identifier = "CATALOG COPY-UNIQUE"
         create_book(book, self.path)
         terms = ["百年", "加西亚", "葉淑吟", "珍藏版", "魔幻家族史", "978957", "COPY-UNIQUE", "皇冠", "2018", "1.2.3", "2024-01-03", "A 架", "已讀"]
         for term in terms:
