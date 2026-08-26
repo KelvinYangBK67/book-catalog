@@ -152,6 +152,7 @@ class EditionInput(CleanModel):
     existing_edition_id: int | None = None
     identifier: str = Field(default="", max_length=1000)
     translator: str = Field(default="", max_length=500)
+    responsibility: str = Field(default="", max_length=1000)
     other_title: str = Field(default="", max_length=1000)
     other_subtitle: str = Field(default="", max_length=1000)
     translated_title: str = Field(default="", max_length=500)
@@ -182,7 +183,9 @@ class EditionInput(CleanModel):
                     value[field] = normalize_semicolon_slots(value[field])
         return value
 
-    @field_validator('translator', 'edition_scripts', 'series', mode='before')
+    @field_validator(
+        'translator', 'responsibility', 'edition_scripts', 'series', mode='before'
+    )
     @classmethod
     def normalize_lists(cls, value: object) -> object:
         return normalize_semicolon_text(value)
@@ -424,6 +427,7 @@ class TagRecord(BaseModel):
     path: str
     has_children: bool = False
     assigned_work_count: int = 0
+    direct_work_count: int = 0
 
 
 class PublisherNormalizationInput(CleanModel):

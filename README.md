@@ -95,6 +95,8 @@ Edition identifier 表示整套或共同識別號，Volume identifier 表示冊�
 
 前端維持 plain JavaScript，公共 API 請求、偏好狀態、通用元件、格式化及四層目錄投影分別位於 `static/api.js`、`static/state.js`、`static/components.js`、`static/formatters.js`、`static/catalog-model.js`。後端標籤／出版社管理集中在 `app/admin_repository.py`；schema bootstrap 留在 `app/database.py`，legacy migration 與資料完整性 guards 集中在 `app/migrations.py`。
 
+書目文字與界面文字使用分離的字體棧。古埃及聖書體及其 Unicode Format Controls 在顯示時由本地 vendored HieroJax 轉為 SVG，資料庫、搜尋及匯入／匯出仍保存原始 Unicode。HieroJax 位於 `static/vendor/hierojax`，依 GNU GPL v3 授權；來源版本及本地路徑修改記錄見該目錄的 `VENDORED.md` 與 `LICENSE`。
+
 ## Metadata resolver、matching 與 merge
 
 `app.metadata_resolver.resolve_metadata(work, edition, volume)` 是有效書目資料的唯一計算入口。它為每個 override 字段返回 `{value, source}`，`source` 為 `work`、`edition`、`volume` 或 `null`；責任人使用 append 語義，返回合併後的 `value` 與逐層 `sources`。API 的 Edition group 及 Volume record 會返回 `effective_metadata`，Copy 不包含任何冊級或繼承字段。

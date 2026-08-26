@@ -25,7 +25,14 @@ def _tags_for_work(connection: Connection, work_id: int) -> list[dict]:
 
 
 def list_tags_from_connection(connection: Connection) -> list[dict]:
-    rows = connection.execute("SELECT id, name, parent_id FROM tags ORDER BY id").fetchall()
+    rows = connection.execute(
+        """SELECT t.id, t.name, t.parent_id,
+                  EXISTS(SELECT 1 FROM tags child WHERE child.parent_id = t.id)
+                      AS has_children,
+                  (SELECT COUNT(*) FROM work_tags wt WHERE wt.tag_id = t.id)
+                      AS direct_work_count
+           FROM tags t ORDER BY t.id"""
+    ).fetchall()
     by_id = {row["id"]: row for row in rows}
 
     def path_for(row: Row) -> str:
@@ -43,12 +50,9 @@ def list_tags_from_connection(connection: Connection) -> list[dict]:
         [{
             "id": row["id"], "name": row["name"], "parent_id": row["parent_id"],
             "path": path_for(row),
-            "has_children": connection.execute(
-                "SELECT 1 FROM tags WHERE parent_id = ? LIMIT 1", (row["id"],)
-            ).fetchone() is not None,
-            "assigned_work_count": connection.execute(
-                "SELECT COUNT(*) FROM work_tags WHERE tag_id = ?", (row["id"],)
-            ).fetchone()[0],
+            "has_children": bool(row["has_children"]),
+            "assigned_work_count": row["direct_work_count"],
+            "direct_work_count": row["direct_work_count"],
         } for row in rows],
         key=lambda item: (item["path"].casefold(), item["id"]),
     )

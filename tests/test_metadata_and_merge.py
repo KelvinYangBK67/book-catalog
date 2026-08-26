@@ -54,6 +54,7 @@ class ResolverTests(unittest.TestCase):
                 "publication_year_end": None,
                 "edition_scripts": "Chinese",
                 "translator": "Alice (translator)",
+                "responsibility": "Carol (editor)",
             },
             {
                 "volume_title": "",
@@ -73,7 +74,7 @@ class ResolverTests(unittest.TestCase):
         self.assertEqual(resolved["publication_year"], {"value": 2003, "source": "volume"})
         self.assertEqual(
             resolved["responsibility"]["value"],
-            "Author; Alice (translator); Bob (editor)",
+            "Author; Alice (translator); Carol (editor); Bob (editor)",
         )
         self.assertEqual(
             [part["source"] for part in resolved["responsibility"]["sources"]],

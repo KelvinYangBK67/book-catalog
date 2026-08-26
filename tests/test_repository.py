@@ -661,6 +661,8 @@ class RepositoryTests(unittest.TestCase):
         created = create_book(book, self.path)
 
         self.assertEqual(list_tags(self.path)[1]["path"], "文學 → 小說")
+        self.assertEqual(list_tags(self.path)[1]["direct_work_count"], 1)
+        self.assertEqual(list_tags(self.path)[0]["direct_work_count"], 0)
         self.assertEqual(created["work"]["tag_ids"], [fiction["id"]])
         works = list_works(path=self.path)
         self.assertEqual(works[0]["tags"][0]["path"], "文學 → 小說")
@@ -812,7 +814,10 @@ class RepositoryTests(unittest.TestCase):
         )
         edition = update_edition_details(
             edition_id,
-            EditionInput(version="Revised", identifier="NEW-ISBN", publisher="New Press"),
+            EditionInput(
+                version="Revised", identifier="NEW-ISBN", publisher="New Press",
+                responsibility="Edition editor",
+            ),
             self.path,
         )
         volume = update_volume_details(
@@ -827,6 +832,9 @@ class RepositoryTests(unittest.TestCase):
         assert all(item is not None for item in (work, edition, volume, copy))
         self.assertEqual(work["work"]["title"], "New title")
         self.assertEqual(edition["editions"][0]["edition"]["version"], "Revised")
+        self.assertEqual(
+            edition["editions"][0]["edition"]["responsibility"], "Edition editor"
+        )
         self.assertEqual(volume["volume_number"], "3")
         self.assertEqual(copy["location"], "New location")
 
@@ -969,7 +977,7 @@ class RepositoryTests(unittest.TestCase):
         original_work_id = existing["edition"]["work_ids"][0]
         original = get_work(original_work_id, self.path)
         assert original is not None
-        with self.assertRaisesRegex(ValueError, "至少需要保留一個 Work"):
+        with self.assertRaisesRegex(ValueError, "版本至少需要保留一個作品"):
             update_work_details(original_work_id, WorkInput.model_validate({
                 **original["work"],
                 "edition_relations": [],

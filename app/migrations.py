@@ -133,7 +133,7 @@ def prepare_legacy_schema(connection: sqlite3.Connection) -> None:
     text_columns = {
         "title": "", "subtitle": "", "version": "", "identifier": "",
         "other_title": "", "other_subtitle": "", "edition_scripts": "",
-        "series": "",
+        "series": "", "responsibility": "",
     }
     for name in text_columns:
         if name not in edition_columns:

@@ -75,6 +75,7 @@ def initialize(path: Path | None = None) -> dict[str, Any]:
                 subtitle TEXT NOT NULL DEFAULT '',
                 identifier TEXT NOT NULL DEFAULT '',
                 translator TEXT NOT NULL DEFAULT '',
+                responsibility TEXT NOT NULL DEFAULT '',
                 other_title TEXT NOT NULL DEFAULT '',
                 other_subtitle TEXT NOT NULL DEFAULT '',
                 translated_title TEXT NOT NULL DEFAULT '',

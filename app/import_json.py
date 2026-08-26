@@ -122,7 +122,7 @@ def import_json_document(
             work_map[int(work["id"])] = work_id
             for old_tag_id in work.get("tag_ids", []):
                 if int(old_tag_id) not in tag_map:
-                    raise ValueError("Work references an unknown tag")
+                    raise ValueError("作品引用了不存在的標籤")
                 connection.execute(
                     "INSERT OR IGNORE INTO work_tags (work_id, tag_id) VALUES (?, ?)",
                     (work_id, tag_map[int(old_tag_id)]),
@@ -132,7 +132,7 @@ def import_json_document(
         for edition in payload.editions:
             old_primary = int(edition["primary_work_id"])
             if old_primary not in work_map:
-                raise ValueError("Edition references an unknown primary Work")
+                raise ValueError("版本引用了不存在的主要作品")
             year_start, year_end = publication_year_bounds(
                 edition.get("publication_year")
             )
@@ -143,17 +143,18 @@ def import_json_document(
             )
             edition_id = int(connection.execute(
                 """INSERT INTO editions
-                       (title, subtitle, identifier, translator,
+                       (title, subtitle, identifier, translator, responsibility,
                         other_title, other_subtitle, translated_title,
                         translated_subtitle, edition_scripts, version, series,
                         publisher, publisher_id, publication_year,
                         publication_year_end, force_separate)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     str(edition.get("title") or ""),
                     str(edition.get("subtitle") or ""),
                     str(edition.get("identifier") or ""),
                     str(edition.get("translator") or ""),
+                    str(edition.get("responsibility") or ""),
                     str(edition.get("other_title") or ""),
                     str(edition.get("other_subtitle") or ""),
                     str(edition.get("translated_title") or ""),
@@ -172,7 +173,7 @@ def import_json_document(
         for volume in payload.volumes:
             old_edition_id = int(volume["edition_id"])
             if old_edition_id not in edition_map:
-                raise ValueError("Volume references an unknown Edition")
+                raise ValueError("冊引用了不存在的版本")
             year_start, year_end = publication_year_bounds(
                 volume.get("publication_year")
             )
@@ -207,7 +208,7 @@ def import_json_document(
             for position, relation in enumerate(relations):
                 old_work_id = int(relation["work_id"])
                 if old_work_id not in work_map:
-                    raise ValueError("Edition relation references an unknown Work")
+                    raise ValueError("版本關聯引用了不存在的作品")
                 relation_type = str(relation.get("relation_type") or "contained")
                 old_volume_id = relation.get("volume_id")
                 volume_id = (
@@ -215,7 +216,7 @@ def import_json_document(
                     if old_volume_id is not None else None
                 )
                 if relation_type == "volume" and volume_id is None:
-                    raise ValueError("Volume relation references an unknown Volume")
+                    raise ValueError("分冊關聯引用了不存在的冊")
                 connection.execute(
                     """INSERT INTO edition_works
                            (edition_id, work_id, position, relation_type, volume_id)
@@ -232,7 +233,7 @@ def import_json_document(
         for copy_record in payload.copies:
             old_volume_id = int(copy_record["volume_id"])
             if old_volume_id not in volume_map:
-                raise ValueError("Copy references an unknown Volume")
+                raise ValueError("實物副本引用了不存在的冊")
             copy_id = int(connection.execute(
                 """INSERT INTO copies
                        (volume_id, acquisition_date, location, reading_record)

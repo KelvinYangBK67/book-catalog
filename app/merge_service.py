@@ -154,7 +154,7 @@ def merge_editions(
     with transaction(path) as connection:
         target, source = _rows(connection, "editions", target_id, source_id)
         fields = (
-            "title", "subtitle", "identifier", "translator", "other_title",
+            "title", "subtitle", "identifier", "translator", "responsibility", "other_title",
             "other_subtitle", "translated_title", "translated_subtitle",
             "edition_scripts", "version", "series", "publisher", "publisher_id",
             "publication_year", "publication_year_end",

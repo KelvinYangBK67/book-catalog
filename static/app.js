@@ -5,6 +5,9 @@ import {
 } from "./components.js";
 import {escapeHtml, splitTerms} from "./formatters.js";
 import {editionRelations, groupCopies, groupedVolumes} from "./catalog-model.js";
+import {
+  initializeSpecialTextRenderer, renderBibliographicText
+} from "./special-text.js";
 
 const list = document.querySelector('#book-list');
 const count = document.querySelector('#book-count');
@@ -47,6 +50,9 @@ let tagViolations = [];
 let publishers = [];
 let publisherNames = [];
 let selectedTagId = null;
+let selectedBrowseTagId = null;
+const browseTagExpandedIds = new Set();
+let browseTagTreeInitialized = false;
 let importRows = [];
 
 const shown = (value) => value === null || value === undefined || value === '' ? '' : escapeHtml(value);
@@ -203,10 +209,7 @@ function renderTagControls() {
     const state = tagPickerValues(picker);
     setTagPickerValues(picker, state.ids, state.names);
   });
-  const managementOptions = tags.map((tag) => '<option value="' + tag.id + '" '
-    + (tag.assigned_work_count ? 'disabled' : '') + '>' + escapeHtml(tagOptionLabel(tag))
-    + (tag.assigned_work_count ? '（已有藏書）' : '') + '</option>').join('');
-  document.querySelector('#tag-parent').innerHTML = '<option value="">無（頂級分類）</option>' + managementOptions;
+  document.querySelector('#tag-parent').innerHTML = tagParentOptions();
   document.querySelector('#tag-tree').innerHTML = tags.length
     ? renderTagTree()
     : '<div class="empty">尚未建立任何標籤。</div>';
@@ -218,7 +221,6 @@ function renderTagControls() {
     ).join('') + '</ul>' : '';
   const editSelect = document.querySelector('#tag-edit-id');
   editSelect.innerHTML = tags.map((tag) => '<option value="' + tag.id + '">' + escapeHtml(tagOptionLabel(tag)) + '</option>').join('');
-  document.querySelector('#tag-edit-parent').innerHTML = '<option value="">無（頂級分類）</option>' + managementOptions;
   if (selectedTagId && tags.some((tag) => tag.id === selectedTagId)) editSelect.value = String(selectedTagId);
   fillTagEditForm();
 }
@@ -274,7 +276,39 @@ function fillTagEditForm() {
   const tag = tags.find((item) => item.id === id);
   if (!tag) return;
   document.querySelector('#tag-edit-name').value = tag.name;
-  document.querySelector('#tag-edit-parent').value = tag.parent_id ?? '';
+  const parentSelect = document.querySelector('#tag-edit-parent');
+  parentSelect.innerHTML = tagParentOptions(tag.id);
+  parentSelect.value = tag.parent_id ?? '';
+}
+
+function tagDescendantIds(tagId) {
+  const descendants = new Set();
+  const pending = [Number(tagId)];
+  while (pending.length) {
+    const parentId = pending.pop();
+    for (const tag of tags.filter((item) => item.parent_id === parentId)) {
+      if (descendants.has(tag.id)) continue;
+      descendants.add(tag.id);
+      pending.push(tag.id);
+    }
+  }
+  return descendants;
+}
+
+function legalTagParents(editingId = null) {
+  const excluded = editingId === null ? new Set() : tagDescendantIds(editingId);
+  if (editingId !== null) excluded.add(Number(editingId));
+  return tags.filter((tag) =>
+    !excluded.has(tag.id) && Number(
+      tag.direct_work_count ?? tag.assigned_work_count ?? 0
+    ) === 0
+  );
+}
+
+function tagParentOptions(editingId = null) {
+  return '<option value="">無（頂級分類）</option>' + legalTagParents(editingId)
+    .map((tag) => '<option value="' + tag.id + '">' + escapeHtml(tagOptionLabel(tag)) + '</option>')
+    .join('');
 }
 
 function renderPublisherControls() {
@@ -313,7 +347,7 @@ function groupAnchor(index) {
 function editionTopDisplay(entry) {
   const metadata = entry.effective_metadata || {};
   return {
-    title: metadata.title?.value || '版本資料',
+    title: metadata.title?.value || '',
     subtitle: metadata.subtitle?.value || ''
   };
 }
@@ -433,13 +467,89 @@ function entryGroupingValues(entry, dimension) {
   return [];
 }
 
+function subtreeWorkIds(tagId, directWorkIds, memo) {
+  if (memo.has(tagId)) return memo.get(tagId);
+  const result = new Set(directWorkIds.get(tagId) || []);
+  for (const child of tags.filter((tag) => tag.parent_id === tagId)) {
+    for (const workId of subtreeWorkIds(child.id, directWorkIds, memo)) {
+      result.add(workId);
+    }
+  }
+  memo.set(tagId, result);
+  return result;
+}
+
+function browseTagTree(parentId, counts) {
+  const children = tags.filter((tag) =>
+    tag.parent_id === parentId && (counts.get(tag.id)?.size || 0) > 0
+  );
+  if (!children.length) return '';
+  return '<ul class="browse-tag-children">' + children.map((tag) => {
+    const descendants = browseTagTree(tag.id, counts);
+    const expanded = browseTagExpandedIds.has(tag.id);
+    const toggle = descendants
+      ? '<button type="button" class="browse-tag-toggle" data-browse-tag-toggle="' + tag.id
+        + '" aria-expanded="' + String(expanded) + '" aria-label="展開或收起下級">›</button>'
+      : '<span class="browse-tag-leaf" aria-hidden="true"></span>';
+    return '<li class="browse-tag-node' + (expanded ? ' is-expanded' : '') + '">'
+      + '<div class="browse-tag-row">' + toggle
+      + '<button type="button" class="browse-tag-select'
+      + (selectedBrowseTagId === tag.id ? ' is-selected' : '')
+      + '" data-browse-tag-select="' + tag.id + '"><span>' + escapeHtml(tag.name)
+      + '</span><small>' + counts.get(tag.id).size + '</small></button></div>'
+      + (descendants ? '<div class="browse-tag-branch">' + descendants + '</div>' : '')
+      + '</li>';
+  }).join('') + '</ul>';
+}
+
+function renderTagBrowse(items) {
+  const directWorkIds = new Map(tags.map((tag) => [tag.id, new Set()]));
+  for (const work of works) {
+    for (const tag of work.tags || []) directWorkIds.get(tag.id)?.add(work.id);
+  }
+  const counts = new Map();
+  for (const tag of tags) subtreeWorkIds(tag.id, directWorkIds, counts);
+  const visibleIds = new Set(
+    tags.filter((tag) => (counts.get(tag.id)?.size || 0) > 0).map((tag) => tag.id)
+  );
+  if (selectedBrowseTagId !== null && !visibleIds.has(selectedBrowseTagId)) {
+    selectedBrowseTagId = null;
+  }
+  if (!browseTagTreeInitialized) {
+    tags.filter((tag) => tag.parent_id === null && visibleIds.has(tag.id))
+      .forEach((tag) => browseTagExpandedIds.add(tag.id));
+    browseTagTreeInitialized = true;
+  }
+  const selectedTag = tags.find((tag) => tag.id === selectedBrowseTagId);
+  const selectedIds = selectedTag
+    ? new Set([selectedTag.id, ...tagDescendantIds(selectedTag.id)]) : visibleIds;
+  const filtered = items.filter((entry) =>
+    (entry.tags || []).some((tag) => selectedIds.has(tag.id))
+  );
+  groupIndex.hidden = false;
+  groupIndex.classList.add('tag-browse-index');
+  groupIndex.innerHTML = '<button type="button" class="browse-tag-all'
+    + (selectedBrowseTagId === null ? ' is-selected' : '')
+    + '" data-browse-tag-all>全部標籤</button>'
+    + browseTagTree(null, counts);
+  const heading = selectedTag ? selectedTag.name : '全部標籤';
+  const workCount = selectedTag
+    ? counts.get(selectedTag.id).size
+    : new Set([...visibleIds].flatMap((id) => [...(directWorkIds.get(id) || [])])).size;
+  list.innerHTML = '<section class="tag-browse-results"><header><strong>'
+    + escapeHtml(heading) + '</strong><span>' + workCount + ' 部作品</span></header>'
+    + (filtered.length ? renderTopRows(filtered)
+      : '<div class="empty">此分類目前沒有符合條件的藏書。</div>')
+    + '</section>';
+}
+
 function renderWorks(query) {
   const dimension = viewSelect.value;
   const items = topEntries();
   const collapseControls = document.querySelector('#group-collapse-controls');
   collectionLayout.classList.toggle('has-index', dimension !== 'all' && items.length > 0);
   const modeName = topModeSelect.value === 'smart'
-    ? '智能條目' : (topModeSelect.value === 'edition' ? 'Edition' : 'Work');
+    ? '智能條目' : (topModeSelect.value === 'edition' ? '版本' : '作品');
   count.textContent = query
     ? items.length + ' 個' + modeName + '符合搜尋'
     : '共 ' + items.length + ' 個' + modeName + ' · ' + books.length + '  份實物副本';
@@ -453,10 +563,17 @@ function renderWorks(query) {
   }
   if (dimension === 'all') {
     groupIndex.hidden = true;
+    groupIndex.classList.remove('tag-browse-index');
     collapseControls.hidden = true;
     list.innerHTML = renderTopRows(items);
     return;
   }
+  if (dimension === 'tags') {
+    collapseControls.hidden = true;
+    renderTagBrowse(items);
+    return;
+  }
+  groupIndex.classList.remove('tag-browse-index');
   const groups = new Map();
   for (const entry of items) {
     let values = entryGroupingValues(entry, dimension);
@@ -492,7 +609,7 @@ function renderTopRows(items) {
 function renderWorkRow(work) {
   return `
     <button class="work-row" type="button" data-work-id="${work.id}">
-      <span class="work-title"><strong>${escapeHtml(work.title)}</strong>${work.subtitle ? `<small>${escapeHtml(work.subtitle)}</small>` : ''}${tagChips(work.tags)}</span>
+      <span class="work-title"><strong>${renderBibliographicText(work.title)}</strong>${work.subtitle ? `<small>${renderBibliographicText(work.subtitle)}</small>` : ''}${tagChips(work.tags)}</span>
       <span class="cell"><span class="cell-label">作者或相關責任人</span>${shown(work.authors)}</span>
       <span class="cell stat"><b>${work.edition_count}</b><small>版本</small></span>
       <span class="cell stat"><b>${work.copy_count}</b><small>實物副本</small></span>
@@ -513,7 +630,7 @@ function renderEditionTopRow(entry) {
   const relatedTitles = entry.related_works.map((work) => work.title).join(' · ');
   return `
     <button class="work-row edition-top-row" type="button" data-edition-top-id="${entry.id}">
-      <span class="work-title"><small class="top-kind">EDITION</small><strong>${escapeHtml(entry.title)}</strong>${entry.subtitle ? `<small>${escapeHtml(entry.subtitle)}</small>` : ''}${tagChips(entry.tags)}</span>
+      <span class="work-title"><small class="top-kind">版本</small><strong>${renderBibliographicText(entry.title)}</strong>${entry.subtitle ? `<small>${renderBibliographicText(entry.subtitle)}</small>` : ''}${tagChips(entry.tags)}</span>
       <span class="cell"><span class="cell-label">關聯作品</span>${shown(relatedTitles)}</span>
       <span class="cell stat structure-stat"><b>${escapeHtml(editionStructureLabel(entry))}</b><small>結構</small></span>
       <span class="cell stat"><b>${entry.copy_count}</b><small>實物副本</small></span>
@@ -670,14 +787,14 @@ function pairedTitleItems(titles, subtitles) {
 
 function editionDisplayData(effectiveMetadata = {}) {
   return {
-    title: effectiveMetadata.title?.value || '\u7248\u672c\u8cc7\u6599',
+    title: effectiveMetadata.title?.value || '',
     subtitle: effectiveMetadata.subtitle?.value || ''
   };
 }
 
 function hasVisibleEditionDetails(edition) {
   const fields = [
-    'title', 'subtitle', 'identifier', 'translator',
+    'title', 'subtitle', 'identifier', 'translator', 'responsibility',
     'other_title', 'other_subtitle',
     'translated_title', 'translated_subtitle',
     'edition_scripts', 'version', 'series',
@@ -719,15 +836,24 @@ function editionHeader(group, options = {}) {
   const scripts = splitTerms(effectiveEditionScripts(group.effective_metadata)).join(' \u00b7 ');
   const versions = splitTerms(edition.version);
   const identifiers = splitTerms(edition.identifier);
+  const responsibilities = [...new Set([
+    ...splitTerms(edition.translator), ...splitTerms(edition.responsibility)
+  ])];
+  const bibliography = [
+    ...versions.map(escapeHtml), publication, ...identifiers.map(escapeHtml)
+  ].filter(Boolean);
+  const title = display.title
+    ? renderBibliographicText(display.title)
+    : '<span class="bibliographic-text">未題名版本</span>';
   return '<span class="edition-summary">'
-    + '<span class="edition-summary-main"><span class="edition-title-line"><strong>' + escapeHtml(display.title) + '</strong>'
+    + '<span class="edition-summary-main"><span class="edition-title-line"><strong>' + title + '</strong>'
     + (scripts ? '<span class="edition-script">[' + escapeHtml(scripts) + ']</span>' : '') + '</span>'
-    + (display.subtitle ? '<small class="edition-subtitle">' + escapeHtml(display.subtitle) + '</small>' : '')
-    + (publication ? '<small class="edition-publication">' + publication + '</small>' : '') + '</span>'
-    + (versions.length ? '<span class="edition-summary-versions">' + versions.map((value) => '<span>' + escapeHtml(value) + '</span>').join('') + '</span>' : '<span class="edition-summary-versions"></span>')
+    + (display.subtitle ? '<small class="edition-subtitle">' + renderBibliographicText(display.subtitle) + '</small>' : '')
+    + (responsibilities.length ? '<small class="edition-responsibility">' + responsibilities.map(escapeHtml).join(' · ') + '</small>' : '')
+    + (bibliography.length ? '<small class="edition-bibliography">' + bibliography.join(' · ') + '</small>' : '')
+    + '</span>'
     + '<span class="edition-count">' + editionHoldingLabel(group) + '</span>'
     + (options.disclosure ? '<span class="disclosure">⌄</span>' : '<span class="edition-summary-spacer"></span>')
-    + (identifiers.length ? '<span class="edition-summary-identifiers">' + identifiers.map((value) => '<span>' + escapeHtml(value) + '</span>').join('') + '</span>' : '')
     + '</span>';
 }
 
@@ -740,45 +866,34 @@ function publisherDisplay(edition) {
 
 
 
+function volumePlainName(volume, fallback = '單冊') {
+  return [volume.volume_number, volume.volume_title].filter(Boolean).join(' · ') || fallback;
+}
+
 function volumeName(volume, fallback = '單冊') {
-  const parts = [volume.volume_number, volume.volume_title].filter(Boolean);
-  return parts.length ? parts.map(escapeHtml).join(' · ') : fallback;
+  const parts = [];
+  if (volume.volume_number) parts.push(escapeHtml(volume.volume_number));
+  if (volume.volume_title) parts.push(renderBibliographicText(volume.volume_title));
+  return parts.length ? parts.join(' · ') : fallback;
 }
 
 function workMenu(workId) {
   return actionMenu('work', workId, [
     {action: 'edit-work', label: '修改作品'},
-    {action: 'add-edition', label: '新增版本'},
     {action: 'delete-work', label: '刪除作品', danger: true}
   ]);
 }
 
 function editionMenu(group) {
-  const volumes = groupedVolumes(group);
-  const implicit = volumes.length === 1
-    && !volumes[0].volume_number && !volumes[0].volume_title;
-  const items = [
+  return actionMenu('edition', group.id, [
     {action: 'edit-edition', label: '修改版本'},
-    {action: 'add-volume', label: '新增冊'}
-  ];
-  if (implicit) {
-    items.push({
-      action: 'add-copy', label: '新增實物副本',
-      volumeId: volumes[0].id
-    });
-  }
-  items.push({action: 'delete-edition', label: '刪除版本', danger: true});
-  const htmlItems = items.map((item) => ({
-    ...item,
-    action: item.volumeId ? 'add-copy-' + item.volumeId : item.action
-  }));
-  return actionMenu('edition', group.id, htmlItems);
+    {action: 'delete-edition', label: '刪除版本', danger: true}
+  ]);
 }
 
 function volumeMenu(volume) {
   return actionMenu('volume', volume.id, [
     {action: 'edit-volume', label: '修改冊資料'},
-    {action: 'add-copy', label: '新增實物副本'},
     {action: 'delete-volume', label: '刪除冊', danger: true}
   ]);
 }
@@ -791,15 +906,36 @@ function copyMenu(copy) {
 }
 
 function copyRows(copies) {
-  return copies.map((copy) => `
+  return copies.map((copy) => {
+    const values = [
+      copy.location
+        ? '<span><small>藏書位置</small>' + escapeHtml(copy.location) + '</span>' : '',
+      copy.acquisition_date
+        ? '<span><small>取得日期</small>' + escapeHtml(copy.acquisition_date) + '</span>' : '',
+      copy.reading_record
+        ? '<span class="copy-reading"><small>閱讀記錄</small>' + escapeHtml(copy.reading_record) + '</span>' : ''
+    ].filter(Boolean).join('');
+    return `
     <div class="copy-item">
       <button class="copy-open" type="button" data-copy-id="${copy.id}">
-        <span><small>實物副本</small><strong>#${copy.id}</strong></span>
-        <span><small>藏書位置</small>${shown(copy.location)}</span>
-        <span class="copy-reading">${copy.reading_record ? escapeHtml(copy.reading_record) : ''}</span>
+        ${values || '<span class="copy-empty-label">實物副本</span>'}
       </button>
       ${copyMenu(copy)}
-    </div>`).join('');
+    </div>`;
+  }).join('');
+}
+
+function layerAddButton(layer, id, action, label) {
+  return '<button class="layer-add-button" type="button" data-layer="' + layer
+    + '" data-layer-id="' + id + '" data-layer-action="' + action + '">＋ '
+    + label + '</button>';
+}
+
+function isImplicitVolume(volume, volumeCount) {
+  return volumeCount === 1
+    && !volume.volume_number && !volume.volume_title
+    && !volume.identifier && !volume.version
+    && !volume.publication_year && !volume.responsibility;
 }
 
 function volumeOverrideSummary(volume) {
@@ -825,22 +961,29 @@ function renderVolumeContent(group) {
   return volumes.map((volume) => {
     const copies = volume.copies || [];
     const overrides = volumeOverrideSummary(volume);
-    const implicit = volumes.length === 1
-      && !volume.volume_number && !volume.volume_title
-      && !volume.identifier && !volume.version
-      && !volume.publication_year && !volume.responsibility;
-    if (implicit && copies.length === 1) {
-      return '<div class="implicit-volume">' + copyRows(copies) + volumeMenu(volume) + '</div>';
+    const implicit = isImplicitVolume(volume, volumes.length);
+    if (implicit) {
+      return '<div class="implicit-volume">'
+        + (copies.length ? copyRows(copies) : '')
+        + '<div class="layer-add-actions">'
+        + layerAddButton('edition', group.id, 'add-copy-' + volume.id, '新增實物副本')
+        + '</div></div>';
     }
     const title = volumeName(volume, volumes.length === 1 ? '單冊' : '未標冊號');
-    return '<section class="volume-card" data-volume-id="' + volume.id + '">'
-      + '<div class="volume-summary"><strong>' + title + '</strong>'
+    return '<section class="volume-card layer-disclosure" data-volume-id="' + volume.id
+      + '" data-layer-disclosure>'
+      + '<div class="layer-summary-row"><button class="layer-summary-toggle" type="button"'
+      + ' data-layer-toggle="volume" aria-expanded="false">'
+      + '<span class="volume-summary"><strong>' + title + '</strong>'
       + '<span class="volume-meta">' + (copies.length + ' 份副本') + '</span>'
       + (overrides.metadata ? '<span class="volume-meta">' + overrides.metadata + '</span>' : '')
       + (overrides.identifiers ? '<span class="volume-identifiers">' + overrides.identifiers + '</span>' : '')
-      + '</div>' + volumeMenu(volume)
-      + '<div class="copy-list">' + (copies.length ? copyRows(copies)
-        : '<div class="empty compact-empty">尚無實物副本</div>') + '</div></section>';
+      + '<span class="disclosure">⌄</span></span></button>' + volumeMenu(volume) + '</div>'
+      + '<div class="volume-content" data-layer-content hidden>'
+      + '<div class="copy-list">' + (copies.length ? copyRows(copies) : '') + '</div>'
+      + '<div class="layer-add-actions">'
+      + layerAddButton('volume', volume.id, 'add-copy', '新增實物副本')
+      + '</div></div></section>';
   }).join('');
 }
 
@@ -848,8 +991,8 @@ function renderPairedTitleDetail(label, pairs) {
   if (!pairs.length) return '';
   return '<div class="edition-detail-item title-pair-detail"><small>' + label + '</small>'
     + '<div class="edition-title-pairs">' + pairs.map((pair) =>
-      '<div class="edition-title-pair">' + (pair.title ? '<strong>' + escapeHtml(pair.title) + '</strong>' : '')
-      + (pair.subtitle ? '<span>' + escapeHtml(pair.subtitle) + '</span>' : '') + '</div>'
+      '<div class="edition-title-pair">' + (pair.title ? '<strong>' + renderBibliographicText(pair.title) + '</strong>' : '')
+      + (pair.subtitle ? '<span>' + renderBibliographicText(pair.subtitle) + '</span>' : '') + '</div>'
     ).join('') + '</div></div>';
 }
 
@@ -866,12 +1009,13 @@ function renderEditionBody(group) {
     details.push('<div class="edition-detail-item title-pair-detail"><small>' + label + '</small>'
       + '<ol class="edition-related-works relation-' + type + '">' + members.map((relation) => {
         const work = relation.work;
-        return '<li><strong>' + escapeHtml(work?.title || ('Work #' + relation.work_id)) + '</strong>'
+        return '<li><strong>' + renderBibliographicText(work?.title || '未命名作品') + '</strong>'
           + (work?.authors ? '<span>' + escapeHtml(work.authors) + '</span>' : '') + '</li>';
       }).join('') + '</ol></div>');
   }
   if (edition.series) details.push('<div class="edition-detail-item"><small>系列</small><span>' + escapeHtml(edition.series) + '</span></div>');
-  if (edition.translator) details.push('<div class="edition-detail-item"><small>譯者或相關責任人</small><span>' + escapeHtml(edition.translator) + '</span></div>');
+  if (edition.responsibility) details.push('<div class="edition-detail-item"><small>版本責任人</small><span>' + escapeHtml(edition.responsibility) + '</span></div>');
+  if (edition.translator) details.push('<div class="edition-detail-item"><small>譯者／翻譯相關責任人</small><span>' + escapeHtml(edition.translator) + '</span></div>');
   if (edition.edition_scripts) details.push('<div class="edition-detail-item"><small>文種</small><span>' + escapeHtml(edition.edition_scripts) + '</span></div>');
   const otherTitles = renderPairedTitleDetail('其他題名', pairedTitleItems(edition.other_title, edition.other_subtitle));
   if (otherTitles) details.push(otherTitles);
@@ -880,33 +1024,46 @@ function renderEditionBody(group) {
   const metadata = details.length
     ? '<div class="edition-detail-grid">' + details.join('') + '</div>' : '';
   return '<div class="edition-body">' + metadata
-    + '<div class="volume-list">' + renderVolumeContent(group) + '</div></div>';
+    + '<div class="volume-list">' + renderVolumeContent(group) + '</div>'
+    + '<div class="layer-add-actions">'
+    + layerAddButton('edition', group.id, 'add-volume', '新增冊')
+    + '</div></div>';
 }
 
 
 function renderWorkDetail(work) {
-  document.querySelector('#detail-title').textContent = work.work.title;
+  const title = document.querySelector('#detail-title');
+  const scriptLabel = splitTerms(work.work.scripts).join(' · ');
+  title.innerHTML = renderBibliographicText(work.work.title)
+    + (scriptLabel ? ' <span class="detail-title-scripts">[' + escapeHtml(scriptLabel) + ']</span>' : '');
+  const detailSubtitle = document.querySelector('#detail-subtitle');
+  detailSubtitle.innerHTML = work.work.subtitle
+    ? renderBibliographicText(work.work.subtitle) : '';
+  detailSubtitle.hidden = !work.work.subtitle;
+  document.querySelector('#detail-header-actions').innerHTML = workMenu(work.id);
   const author = work.work.authors
     ? '<p class="work-detail-author">' + escapeHtml(work.work.authors) + '</p>' : '';
-  const subtitle = work.work.subtitle
-    ? '<p class="work-detail-subtitle">' + escapeHtml(work.work.subtitle) + '</p>' : '';
-  const scripts = work.work.scripts
-    ? '<p class="work-detail-scripts"><small>文種</small>' + escapeHtml(work.work.scripts) + '</p>' : '';
   const assignedTags = tags.filter((tag) => work.work.tag_ids.includes(tag.id));
+  const summaryParts = [
+    ...assignedTags.map((tag) => escapeHtml(tag.name)),
+    work.editions.length + ' 個版本',
+    work.editions.reduce((sum, item) => sum + groupCopies(item).length, 0) + ' 份實物副本'
+  ];
   const editions = work.editions.map((group) => {
-    const content = editionHeader(group)
-      + editionMenu(group);
-    return '<section class="' + (work.editions.length === 1 ? 'merged-edition' : 'edition-card')
-      + '"><div class="merged-edition-header">' + content
-      + '</div>' + renderEditionBody(group) + '</section>';
+    return '<section class="edition-card layer-disclosure" data-layer-disclosure>'
+      + '<div class="layer-summary-row"><button class="layer-summary-toggle" type="button"'
+      + ' data-layer-toggle="edition" aria-expanded="false">'
+      + editionHeader(group, {disclosure: true}) + '</button>' + editionMenu(group) + '</div>'
+      + '<div data-layer-content hidden>' + renderEditionBody(group) + '</div></section>';
   }).join('');
   document.querySelector('#detail-content').innerHTML =
-    '<section class="work-overview">' + workMenu(work.id)
-    + subtitle + author + scripts + tagChips(assignedTags)
-    + '<p>' + work.editions.length + ' 個版本 · '
-    + work.editions.reduce((sum, item) => sum + groupCopies(item).length, 0) + ' 份實物副本</p></section>'
+    '<section class="work-overview">' + author
+    + '<p class="work-detail-meta">' + summaryParts.join(' · ') + '</p></section>'
     + '<section class="edition-list">'
-    + (editions || '<div class="empty">此作品尚無版本。</div>') + '</section>';
+    + (editions || '<div class="empty">此作品尚無版本。</div>')
+    + '<div class="layer-add-actions">'
+    + layerAddButton('work', work.id, 'add-edition', '新增版本')
+    + '</div></section>';
 }
 
 function renderEditionTopDetail() {
@@ -918,13 +1075,20 @@ function renderEditionTopDetail() {
   }
   activeWork = {...activeWork, editions: [group]};
   const display = editionTopDisplay(entry);
-  document.querySelector('#detail-title').textContent = display.title;
+  const scripts = splitTerms(effectiveEditionScripts(group.effective_metadata)).join(' · ');
+  document.querySelector('#detail-title').innerHTML = renderBibliographicText(display.title || '未題名版本')
+    + (scripts ? ' <span class="detail-title-scripts">[' + escapeHtml(scripts) + ']</span>' : '');
+  const detailSubtitle = document.querySelector('#detail-subtitle');
+  detailSubtitle.innerHTML = display.subtitle
+    ? renderBibliographicText(display.subtitle) : '';
+  detailSubtitle.hidden = !display.subtitle;
+  document.querySelector('#detail-header-actions').innerHTML = editionMenu(group);
   document.querySelector('#detail-content').innerHTML =
-    '<section class="edition-top-overview"><p class="eyebrow">EDITION VIEW</p>'
+    '<section class="edition-top-overview"><p class="eyebrow">版本</p>'
     + '<p>' + escapeHtml(editionStructureLabel(entry)) + ' · '
     + groupCopies(group).length + '  份實物副本</p></section>'
     + '<section class="edition-list"><section class="merged-edition">'
-    + '<div class="merged-edition-header">' + editionHeader(group, {display}) + editionMenu(group) + '</div>'
+    + '<div class="merged-edition-header">' + editionHeader(group, {display}) + '</div>'
     + renderEditionBody(group) + '</section></section>';
 }
 
@@ -955,7 +1119,7 @@ async function openEditionTop(editionId) {
   const entry = editionEntries.find((item) => item.id === editionId);
   const workId = entry?.relations[0]?.work_id;
   if (!entry || !workId) {
-    flash('找不到此 Edition 的關聯 Work。', 'error');
+    flash('找不到此版本的關聯作品。', 'error');
     return;
   }
   try {
@@ -988,19 +1152,26 @@ async function openCopy(copyId) {
       ? groupedVolumes(group).find((volume) => volume.id === activeCopy.volume_id)
       : null;
     const editionTitle = group
-      ? editionDisplayData(group.effective_metadata).title : 'Edition';
-    const volumeTitle = activeVolume ? volumeName(activeVolume, '單冊') : 'Volume';
-    document.querySelector('#copy-detail-title').textContent = '實物副本 #' + activeCopy.id;
+      ? editionDisplayData(group.effective_metadata).title : '版本';
+    const volumeTitle = activeVolume && group
+      && !isImplicitVolume(activeVolume, groupedVolumes(group).length)
+      ? volumeName(activeVolume, '') : '';
+    const detailRows = [
+      activeCopy.location
+        ? '<div><dt>藏書位置</dt><dd>' + escapeHtml(activeCopy.location) + '</dd></div>' : '',
+      activeCopy.acquisition_date
+        ? '<div><dt>取得日期</dt><dd>' + escapeHtml(activeCopy.acquisition_date) + '</dd></div>' : '',
+      activeCopy.reading_record
+        ? '<div><dt>閱讀記錄</dt><dd>' + escapeHtml(activeCopy.reading_record) + '</dd></div>' : ''
+    ].filter(Boolean).join('');
+    document.querySelector('#copy-detail-title').textContent = '館藏資料';
     document.querySelector('#copy-detail-content').innerHTML =
       '<section class="copy-detail-card">' + copyMenu(activeCopy)
-      + '<p class="breadcrumb">' + escapeHtml(activeWork?.work?.title || '')
-      + ' › ' + escapeHtml(editionTitle) + ' › ' + volumeTitle + '</p>'
-      + '<h3>館藏資料</h3><dl class="copy-detail-list">'
-      + '<div><dt>編號</dt><dd>#' + activeCopy.id + '</dd></div>'
-      + (activeCopy.location ? '<div><dt>藏書位置</dt><dd>' + escapeHtml(activeCopy.location) + '</dd></div>' : '')
-      + (activeCopy.acquisition_date ? '<div><dt>取得日期</dt><dd>' + escapeHtml(activeCopy.acquisition_date) + '</dd></div>' : '')
-      + (activeCopy.reading_record ? '<div><dt>閱讀記錄</dt><dd>' + escapeHtml(activeCopy.reading_record) + '</dd></div>' : '')
-      + '</dl></section>';
+      + '<p class="breadcrumb">' + renderBibliographicText(activeWork?.work?.title || '')
+      + (editionTitle ? ' › ' + renderBibliographicText(editionTitle) : '')
+      + (volumeTitle ? ' › ' + volumeTitle : '') + '</p>'
+      + (detailRows ? '<dl class="copy-detail-list">' + detailRows + '</dl>' : '')
+      + '</section>';
     copyDialog.showModal();
   } catch (error) {
     flash(error.message, 'error');
@@ -1047,6 +1218,33 @@ function updateCopyMode() {
   updateDisclosureCounts(form);
 }
 
+function updateTranslationFields(container) {
+  const toggle = container.querySelector('[data-translation-toggle]');
+  const fields = container.querySelector('[data-translation-fields]');
+  if (!toggle || !fields) return;
+  fields.hidden = !toggle.checked;
+}
+
+function volumeOverridesPresent(volume) {
+  return Boolean(volume && [
+    volume.identifier, volume.version, volume.publication_year, volume.responsibility
+  ].some((value) => value !== null && value !== undefined && String(value).trim()));
+}
+
+function updateVolumeInheritance(container) {
+  const toggle = container.querySelector('[data-volume-inherits]');
+  const fields = container.querySelector('[data-volume-override-fields]');
+  if (!toggle || !fields) return;
+  fields.hidden = toggle.checked;
+}
+
+function setBookVolumeFieldsVisible(visible) {
+  const fields = form.querySelector('[data-volume-form-fields]');
+  const button = form.querySelector('[data-add-volume-fields]');
+  fields.hidden = !visible;
+  button.hidden = visible;
+}
+
 enhanceRepeatable(form, 'edition.identifier', '添加識別號');
 enhanceRepeatable(form, 'edition.version', '添加版本');
 enhanceRepeatable(document.querySelector('#edition-edit-form'), 'identifier', '添加識別號');
@@ -1075,7 +1273,7 @@ function volumeOptionsForEdition(editionId, selectedId = null, automatic = false
   return first + volumes.map((volume) =>
     '<option value="' + volume.id + '"'
       + (Number(selectedId) === Number(volume.id) ? ' selected' : '') + '>'
-      + volumeName(volume, '單冊') + '</option>'
+      + escapeHtml(volumePlainName(volume, '單冊')) + '</option>'
   ).join('');
 }
 
@@ -1100,7 +1298,7 @@ function createEditionWorkRow(editor, relation, fixed = false) {
   row.dataset.fixed = String(fixed);
   row.dataset.implicitWork = String(workId === 0);
   const workOptionsMarkup = workId === 0
-    ? '<option value="0">目前正在新增的 Work</option>'
+    ? '<option value="0">目前正在新增的作品</option>'
     : workOptionMarkup(workId);
   row.innerHTML = '<select class="edition-work-select" aria-label="關聯作品" '
     + (workId === 0 ? 'disabled' : '') + '>' + workOptionsMarkup + '</select>'
@@ -1162,7 +1360,7 @@ function editionWorkRelations(editor) {
     const relationType = row.querySelector('[data-relation-type]').value;
     const rawVolumeId = row.querySelector('[data-relation-volume]').value;
     if (relationType === 'volume' && editor.dataset.editionId && !rawVolumeId) {
-      throw new Error('分冊關聯必須選擇此 Edition 下的冊。');
+      throw new Error('分冊關聯必須選擇此版本下的冊。');
     }
     return {
       work_id: Number(row.querySelector('.edition-work-select').value),
@@ -1174,7 +1372,7 @@ function editionWorkRelations(editor) {
     relation.work_id || rows[index].dataset.implicitWork === 'true'
   );
   const ids = relations.map((relation) => relation.work_id);
-  if (new Set(ids).size !== ids.length) throw new Error('同一個 Work 不能重複關聯。');
+  if (new Set(ids).size !== ids.length) throw new Error('同一個作品不能重複關聯。');
   return relations;
 }
 
@@ -1185,13 +1383,13 @@ function installWorkSearch(editor) {
   search.dataset.workRelationSearch = '';
   search.innerHTML =
     '<div class="relation-search-grid">'
-    + '<input data-work-search-title placeholder="Work 題名">'
+    + '<input data-work-search-title placeholder="作品題名">'
     + '<input data-work-search-subtitle placeholder="副題名">'
     + '<input data-work-search-authors placeholder="作者或相關責任人">'
     + '</div><div class="relation-search-results" data-work-results hidden></div>';
   editor.querySelector('.edition-work-link-rows').before(search);
   const button = editor.querySelector('[data-add-edition-work]');
-  button.textContent = '搜尋／瀏覽已有 Work';
+  button.textContent = '搜尋／瀏覽已有作品';
 }
 
 function renderWorkRelationCandidates(editor) {
@@ -1214,11 +1412,11 @@ function renderWorkRelationCandidates(editor) {
   results.hidden = false;
   results.innerHTML = matches.length ? matches.map((work) =>
     '<button type="button" class="relation-candidate" data-work-candidate="' + work.id + '">'
-      + '<strong>' + escapeHtml(work.title) + '</strong>'
-      + (work.subtitle ? '<span>' + escapeHtml(work.subtitle) + '</span>' : '')
+      + '<strong>' + renderBibliographicText(work.title) + '</strong>'
+      + (work.subtitle ? '<span>' + renderBibliographicText(work.subtitle) + '</span>' : '')
       + (work.authors ? '<small>' + escapeHtml(work.authors) + '</small>' : '')
       + '</button>'
-  ).join('') : '<p class="empty-candidates">沒有符合條件且尚未關聯的 Work。</p>';
+  ).join('') : '<p class="empty-candidates">沒有符合條件且尚未關聯的作品。</p>';
 }
 
 function setupEditionWorkLinks() {
@@ -1266,7 +1464,7 @@ function setupEditionWorkLinks() {
 function editionCandidateTitle(edition) {
   return edition.effective_metadata?.title?.value
     || splitTerms(edition.identifier)[0]
-    || ('Edition #' + edition.id);
+    || '未命名版本';
 }
 
 function updateWorkEditionRelationRow(row, clear = false) {
@@ -1292,9 +1490,9 @@ function createWorkEditionRow(editor, relation) {
     edition.publication_year
   ].filter(Boolean).join(' · ');
   row.innerHTML =
-    '<span class="work-edition-selected"><strong>' + escapeHtml(editionCandidateTitle(edition)) + '</strong>'
+    '<span class="work-edition-selected"><strong>' + renderBibliographicText(editionCandidateTitle(edition)) + '</strong>'
     + (edition.effective_metadata?.subtitle?.value
-      ? '<span>' + escapeHtml(edition.effective_metadata.subtitle.value) + '</span>' : '')
+      ? '<span>' + renderBibliographicText(edition.effective_metadata.subtitle.value) + '</span>' : '')
     + (publication ? '<small>' + escapeHtml(publication) + '</small>' : '')
     + (edition.identifier ? '<small>' + shownLines(edition.identifier) + '</small>' : '')
     + '</span><select data-work-edition-type aria-label="關聯類型">'
@@ -1357,13 +1555,13 @@ function renderEditionRelationCandidates(editor) {
       edition.publication_year
     ].filter(Boolean).join(' · ');
     return '<button type="button" class="relation-candidate" data-edition-candidate="' + edition.id + '">'
-      + '<strong>' + escapeHtml(editionCandidateTitle(edition)) + '</strong>'
+      + '<strong>' + renderBibliographicText(editionCandidateTitle(edition)) + '</strong>'
       + (edition.effective_metadata?.subtitle?.value
-        ? '<span>' + escapeHtml(edition.effective_metadata.subtitle.value) + '</span>' : '')
+        ? '<span>' + renderBibliographicText(edition.effective_metadata.subtitle.value) + '</span>' : '')
       + (publication ? '<small>' + escapeHtml(publication) + '</small>' : '')
       + (edition.identifier ? '<small>' + escapeHtml(edition.identifier) + '</small>' : '')
       + '</button>';
-  }).join('') : '<p class="empty-candidates">沒有符合條件且尚未關聯的 Edition。</p>';
+  }).join('') : '<p class="empty-candidates">沒有符合條件且尚未關聯的版本。</p>';
 }
 
 function workEditionRelations(editor) {
@@ -1371,7 +1569,7 @@ function workEditionRelations(editor) {
     const relationType = row.querySelector('[data-work-edition-type]').value;
     const rawVolumeId = row.querySelector('[data-work-edition-volume]').value;
     if (relationType === 'volume' && !rawVolumeId) {
-      throw new Error('分冊關聯必須選擇該 Edition 下的冊。');
+      throw new Error('分冊關聯必須選擇該版本下的冊。');
     }
     return {
       edition_id: Number(row.dataset.editionId),
@@ -1417,9 +1615,12 @@ function setupWorkEditionLinks() {
 function openWorkEditor(work = null) {
   const editForm = document.querySelector('#work-edit-form');
   editForm.reset();
+  editForm.querySelectorAll('[data-disclosure]').forEach((details) => {
+    details.open = false;
+  });
   editingWorkId = work?.id ?? null;
   document.querySelector('#work-form-mode').textContent = work ? '修改作品' : '新增作品';
-  document.querySelector('#work-form-title').textContent = work ? '修改作品' : '建立 Work';
+  document.querySelector('#work-form-title').textContent = work ? '修改作品' : '建立作品';
   document.querySelector('#work-save-button').textContent = work ? '保存作品' : '建立作品';
   for (const name of ['title', 'subtitle', 'authors', 'scripts']) {
     editForm.elements.namedItem(name).value = work?.work?.[name] ?? '';
@@ -1430,6 +1631,10 @@ function openWorkEditor(work = null) {
     []
   );
   setWorkEditionLinks(editForm.querySelector('[data-work-edition-links]'), work);
+  updateDisclosureCounts(editForm);
+  editForm.querySelectorAll('[data-disclosure].has-values').forEach((details) => {
+    details.open = true;
+  });
   workEditDialog.showModal();
 }
 
@@ -1446,6 +1651,8 @@ function openForm(
   form.elements.namedItem('copy-mode').value = 'single';
   document.querySelector('#copy-mode-controls').hidden = Boolean(book);
   updateCopyMode();
+  setBookVolumeFieldsVisible(false);
+  updateVolumeInheritance(form);
   setRepeatable(form, 'edition.identifier', '');
   setRepeatable(form, 'edition.version', '');
   setTitlePairs(form.querySelector('[data-paired-titles]'));
@@ -1488,6 +1695,13 @@ function openForm(
       sourceEdition.other_title, sourceEdition.other_subtitle
     );
   }
+  const translated = Boolean(sourceEdition && [
+    sourceEdition.translated_title,
+    sourceEdition.translated_subtitle,
+    sourceEdition.translator
+  ].some((value) => String(value || '').trim()));
+  form.querySelector('[data-translation-toggle]').checked = translated;
+  updateTranslationFields(form);
   if (book?.volume) {
     setField('volume.volume_number', book.volume.volume_number);
     setField('volume.volume_title', book.volume.volume_title);
@@ -1495,6 +1709,14 @@ function openForm(
     setField('volume.version', book.volume.version);
     setField('volume.publication_year', book.volume.publication_year);
     setField('volume.responsibility', book.volume.responsibility);
+    const explicitVolume = Boolean(
+      book.volume.volume_number || book.volume.volume_title
+      || volumeOverridesPresent(book.volume)
+    );
+    setBookVolumeFieldsVisible(explicitVolume);
+    form.querySelector('[data-volume-inherits]').checked =
+      !volumeOverridesPresent(book.volume);
+    updateVolumeInheritance(form);
   }
   if (book?.copy) {
     for (const key of ['acquisition_date', 'location', 'reading_record']) {
@@ -1527,11 +1749,15 @@ function formPayload() {
       existing_edition_id: Number(document.querySelector('#existing-edition-id').value) || null,
       work_relations: editionWorkRelations(form.querySelector('[data-edition-work-links]')),
       identifier: repeatableValue(form, 'edition.identifier'),
-      translator: get('edition.translator'),
+      translator: form.querySelector('[data-translation-toggle]').checked
+        ? get('edition.translator') : '',
+      responsibility: get('edition.responsibility'),
       other_title: otherTitles.other_title,
       other_subtitle: otherTitles.other_subtitle,
-      translated_title: get('edition.translated_title'),
-      translated_subtitle: get('edition.translated_subtitle'),
+      translated_title: form.querySelector('[data-translation-toggle]').checked
+        ? get('edition.translated_title') : '',
+      translated_subtitle: form.querySelector('[data-translation-toggle]').checked
+        ? get('edition.translated_subtitle') : '',
       edition_scripts: get('edition.edition_scripts'),
       version: repeatableValue(form, 'edition.version', true),
       series: get('edition.series'),
@@ -1544,10 +1770,14 @@ function formPayload() {
     volume: {
       volume_number: get('volume.volume_number'),
       volume_title: get('volume.volume_title'),
-      identifier: get('volume.identifier'),
-      version: get('volume.version'),
-      publication_year: get('volume.publication_year') || null,
-      responsibility: get('volume.responsibility')
+      identifier: form.querySelector('[data-volume-inherits]').checked
+        ? '' : get('volume.identifier'),
+      version: form.querySelector('[data-volume-inherits]').checked
+        ? '' : get('volume.version'),
+      publication_year: form.querySelector('[data-volume-inherits]').checked
+        ? null : (get('volume.publication_year') || null),
+      responsibility: form.querySelector('[data-volume-inherits]').checked
+        ? '' : get('volume.responsibility')
     },
     copy: {
       acquisition_date: get('copy.acquisition_date') || null,
@@ -1590,6 +1820,9 @@ function openEditionEditor(group) {
   activeEdition = group;
   const editForm = document.querySelector('#edition-edit-form');
   editForm.reset();
+  editForm.querySelectorAll('[data-disclosure]').forEach((details) => {
+    details.open = false;
+  });
   for (const [key, value] of Object.entries(group.edition)) {
     if (!['identifier', 'version', 'other_title', 'other_subtitle'].includes(key)) {
       const control = editForm.elements.namedItem(key);
@@ -1608,7 +1841,16 @@ function openEditionEditor(group) {
     editForm.querySelector('[data-paired-titles]'),
     group.edition.other_title, group.edition.other_subtitle
   );
+  editForm.querySelector('[data-translation-toggle]').checked = [
+    group.edition.translated_title,
+    group.edition.translated_subtitle,
+    group.edition.translator
+  ].some((value) => String(value || '').trim());
+  updateTranslationFields(editForm);
   updateDisclosureCounts(editForm);
+  editForm.querySelectorAll('[data-disclosure].has-values').forEach((details) => {
+    details.open = true;
+  });
   editionEditDialog.showModal();
 }
 
@@ -1623,6 +1865,9 @@ function openVolumeEditor(volume = null, editionId = null) {
   ]) {
     editForm.elements.namedItem(name).value = volume?.[name] ?? '';
   }
+  editForm.querySelector('[data-volume-inherits]').checked =
+    !volumeOverridesPresent(volume);
+  updateVolumeInheritance(editForm);
   volumeEditDialog.showModal();
 }
 
@@ -1659,15 +1904,15 @@ async function deleteEditionGroup(group) {
 
 async function deleteVolumeRecord(volume) {
   if (!volume || !window.confirm(
-    `確定刪除「${volumeName(volume, '單冊').replaceAll('&middot;', '·')}」及其 ${volume.copies.length} 份副本嗎？`
+    `確定刪除「${volumePlainName(volume, '單冊')}」及其 ${volume.copies.length} 份副本嗎？`
   )) return;
   await request(`/api/volumes/${volume.id}`, {method: 'DELETE'});
   await refreshActiveDetail();
-  flash('冊已刪除，Edition 已保留。');
+  flash('冊已刪除，版本已保留。');
 }
 
 async function deleteCopyRecord(copy) {
-  if (!copy || !window.confirm(`確定刪除實物副本 #${copy.id} 嗎？`)) return;
+  if (!copy || !window.confirm('確定刪除此實物副本嗎？')) return;
   await request(`/api/copies/${copy.id}`, {method: 'DELETE'});
   if (copyDialog.open) copyDialog.close();
   activeCopy = null;
@@ -1796,6 +2041,26 @@ viewSelect.addEventListener('change', () => {
   setPreference('view', viewSelect.value);
   renderWorks(searchInput.value);
 });
+groupIndex.addEventListener('click', (event) => {
+  const toggle = event.target.closest('[data-browse-tag-toggle]');
+  if (toggle) {
+    const tagId = Number(toggle.dataset.browseTagToggle);
+    if (browseTagExpandedIds.has(tagId)) browseTagExpandedIds.delete(tagId);
+    else browseTagExpandedIds.add(tagId);
+    renderWorks(searchInput.value);
+    return;
+  }
+  const select = event.target.closest('[data-browse-tag-select]');
+  if (select) {
+    selectedBrowseTagId = Number(select.dataset.browseTagSelect);
+    renderWorks(searchInput.value);
+    return;
+  }
+  if (event.target.closest('[data-browse-tag-all]')) {
+    selectedBrowseTagId = null;
+    renderWorks(searchInput.value);
+  }
+});
 topModeSelect.addEventListener('change', () => {
   setPreference('top-mode', topModeSelect.value);
   renderWorks(searchInput.value);
@@ -1803,6 +2068,20 @@ topModeSelect.addEventListener('change', () => {
 form.elements.namedItem('copy-mode').forEach((radio) =>
   radio.addEventListener('change', updateCopyMode)
 );
+document.querySelectorAll('[data-translation-toggle]').forEach((toggle) => {
+  toggle.addEventListener('change', () =>
+    updateTranslationFields(toggle.closest('form'))
+  );
+});
+document.querySelectorAll('[data-volume-inherits]').forEach((toggle) => {
+  toggle.addEventListener('change', () =>
+    updateVolumeInheritance(toggle.closest('form'))
+  );
+});
+form.querySelector('[data-add-volume-fields]').addEventListener('click', () => {
+  setBookVolumeFieldsVisible(true);
+  form.querySelector('[name="volume.volume_number"]').focus();
+});
 document.querySelector('.brand').addEventListener('click', (event) => {
   event.preventDefault(); searchInput.value = ''; loadWorks();
 });
@@ -1821,17 +2100,32 @@ document.querySelector('#detail-content').addEventListener('click', async (event
     await handleLayerAction(action);
     return;
   }
+  const toggle = event.target.closest('[data-layer-toggle]');
+  if (toggle) {
+    const disclosure = toggle.closest('[data-layer-disclosure]');
+    const content = disclosure?.querySelector(':scope > [data-layer-content]');
+    if (!content) return;
+    const expanded = content.hidden;
+    content.hidden = !expanded;
+    disclosure.classList.toggle('is-expanded', expanded);
+    toggle.setAttribute('aria-expanded', String(expanded));
+    return;
+  }
   const copyRow = event.target.closest('[data-copy-id]');
   if (copyRow) openCopy(Number(copyRow.dataset.copyId));
 });
+document.querySelector('#detail-header-actions').addEventListener('click', async (event) => {
+  const action = event.target.closest('[data-layer-action]');
+  if (action) await handleLayerAction(action);
+});
 async function deleteActiveWork() {
-  if (!activeWork || !window.confirm(`確定刪除作品「${activeWork.work.title}」嗎？僅關聯此作品的 Edition 會一併刪除；仍關聯其他 Work 的合刊 Edition 與實物副本會保留。`)) return;
+  if (!activeWork || !window.confirm(`確定刪除作品「${activeWork.work.title}」嗎？僅關聯此作品的版本會一併刪除；仍關聯其他作品的合刊版本與實物副本會保留。`)) return;
   try {
     await request(`/api/works/${activeWork.id}`, {method: 'DELETE'});
     detailDialog.close();
     activeWork = null;
     await loadWorks(searchInput.value);
-    flash('作品已刪除；仍有其他 Work 關聯的合刊 Edition 已保留。');
+    flash('作品已刪除；仍有其他作品關聯的合刊版本已保留。');
   } catch (error) {
     flash(error.message, 'error');
   }
@@ -1967,7 +2261,7 @@ document.querySelector('#work-edit-form').addEventListener('submit', async (even
     activeTopEditionId = null;
     renderWorkDetail(activeWork);
     if (!detailDialog.open) detailDialog.showModal();
-    flash(isNew ? '作品已建立並完成 Edition 關聯。' : '作品資料與 Edition 關聯已更新。');
+    flash(isNew ? '作品已建立並完成版本關聯。' : '作品資料與版本關聯已更新。');
   } catch (error) { flash(error.message, 'error'); }
 });
 document.querySelector('#edition-edit-form').addEventListener('submit', async (event) => {
@@ -1986,10 +2280,16 @@ document.querySelector('#edition-edit-form').addEventListener('submit', async (e
         series: get('series'),
         identifier: repeatableValue(editForm, 'identifier'), publisher: get('publisher'),
         publisher_id: activeEdition.edition.publisher_id, publisher_canonical: activeEdition.edition.publisher_canonical,
-        publication_year: year || null, translator: get('translator'),
+        publication_year: year || null,
+        translator: editForm.querySelector('[data-translation-toggle]').checked
+          ? get('translator') : '',
+        responsibility: get('responsibility'),
         edition_scripts: get('edition_scripts'),
         other_title: otherTitles.other_title, other_subtitle: otherTitles.other_subtitle,
-        translated_title: get('translated_title'), translated_subtitle: get('translated_subtitle')
+        translated_title: editForm.querySelector('[data-translation-toggle]').checked
+          ? get('translated_title') : '',
+        translated_subtitle: editForm.querySelector('[data-translation-toggle]').checked
+          ? get('translated_subtitle') : ''
       })
     });
     activeWork = await request(`/api/works/${activeWork.id}`);
@@ -2007,10 +2307,14 @@ document.querySelector('#volume-edit-form').addEventListener('submit', async (ev
     position: activeVolume?.position ?? null,
     volume_number: get('volume_number'),
     volume_title: get('volume_title'),
-    identifier: get('identifier'),
-    version: get('version'),
-    publication_year: get('publication_year') || null,
-    responsibility: get('responsibility')
+    identifier: editForm.querySelector('[data-volume-inherits]').checked
+      ? '' : get('identifier'),
+    version: editForm.querySelector('[data-volume-inherits]').checked
+      ? '' : get('version'),
+    publication_year: editForm.querySelector('[data-volume-inherits]').checked
+      ? null : (get('publication_year') || null),
+    responsibility: editForm.querySelector('[data-volume-inherits]').checked
+      ? '' : get('responsibility')
   };
   try {
     if (activeVolume) {
@@ -2077,7 +2381,7 @@ form.addEventListener('submit', async (event) => {
     await loadTags(); await loadPublishers(); await loadWorks(searchInput.value);
     if (id) flash('藏書資料已更新。');
     else if (isBatch) flash('已在同一版本下新增 ' + saved.length + ' 冊。');
-    else flash('實物副本 #' + saved.id + ' 已加入書架。');
+    else flash('實物副本已加入書架。');
   } catch (error) {
     flash(error.message, 'error');
   } finally {
@@ -2088,7 +2392,7 @@ form.addEventListener('submit', async (event) => {
 function renderImportPreview() {
   const preview = document.querySelector('#import-preview');
   document.querySelector('#import-summary').textContent =
-    `共讀取 ${importRows.length} 行；系統會分別檢查 Work、Edition、Volume 與 Copy 候選。`;
+    `共讀取 ${importRows.length} 行；系統會分別檢查作品、版本、冊與實物副本候選。`;
   preview.innerHTML = importRows.map((row, index) => {
     const book = row.book;
     const matches = row.matching_copies;
@@ -2106,13 +2410,13 @@ function renderImportPreview() {
           : '新增作品或版本';
     return `<div class="import-row">
       <label class="import-keep"><input type="checkbox" data-import-keep="${index}" checked> 保留</label>
-      <div><strong>${escapeHtml(book.work.title)}</strong>
+      <div><strong>${renderBibliographicText(book.work.title)}</strong>
         <small>${shown(book.work.authors)} · ${shown(book.edition.version)} · 冊 ${shown([book.volume.volume_number, book.volume.volume_title].filter(Boolean).join(' · '))}</small>
         <small>${matchText}</small></div>
       <label>實物副本處理
         <select data-import-action="${index}" ${matches.length ? '' : 'disabled'}>
           ${matches.map((match) => match.id
-            ? `<option value="copy:${match.id}">覆蓋實物副本 #${match.id}${match.location ? ` · ${escapeHtml(match.location)}` : ''}</option>`
+            ? `<option value="copy:${match.id}">覆蓋既有實物副本${match.location ? ` · ${escapeHtml(match.location)}` : ''}</option>`
             : `<option value="row:${match.row_number}">覆蓋本次 CSV 第 ${match.row_number} 行的實物副本</option>`
           ).join('')}
           <option value="import">${matches.length ? '仍新增為另一實物副本' : '新增實物副本'}</option>
@@ -2192,24 +2496,54 @@ document.querySelector('#import-confirm').addEventListener('click', async () => 
 
 function addExportControls() {
   const controls = document.querySelector('.view-controls');
-  const countNode = document.querySelector('#book-count');
+  const collapseControls = document.querySelector('#group-collapse-controls');
   for (const format of ['json', 'csv']) {
     const link = document.createElement('a');
     link.className = 'secondary export-link';
     link.href = `/api/export/${format}`;
     link.download = `book-catalog.${format}`;
     link.textContent = `導出 ${format.toUpperCase()}`;
-    controls.insertBefore(link, countNode);
+    controls.insertBefore(link, collapseControls);
   }
+}
+
+function setupMobileActions() {
+  const button = document.querySelector('#mobile-more-button');
+  const menu = document.querySelector('#secondary-actions');
+  const close = () => {
+    menu.classList.remove('is-open');
+    button.setAttribute('aria-expanded', 'false');
+  };
+  button.addEventListener('click', (event) => {
+    event.stopPropagation();
+    const open = menu.classList.toggle('is-open');
+    button.setAttribute('aria-expanded', String(open));
+  });
+  menu.addEventListener('click', (event) => {
+    if (event.target.closest('button')) close();
+  });
+  document.addEventListener('click', (event) => {
+    if (!menu.contains(event.target)) close();
+  });
+  document.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') close();
+  });
 }
 
 form.elements.namedItem('work.authors').placeholder = '多項用半角分號 ; 分隔';
 form.elements.namedItem('work.scripts').placeholder = '多項用半角分號 ; 分隔';
 setupTagPickers();
 updateDisclosureCounts(form);
+document.querySelectorAll('form').forEach((currentForm) => {
+  const refreshDisclosures = () => updateDisclosureCounts(currentForm);
+  currentForm.addEventListener('input', refreshDisclosures);
+  currentForm.addEventListener('change', refreshDisclosures);
+});
 setupEditionWorkLinks();
 setupWorkEditionLinks();
+setupMobileActions();
 addExportControls();
+initializeSpecialTextRenderer();
 const savedView = getPreference('view');
 if (Array.from(viewSelect.options).some((option) => option.value === savedView)) {
   viewSelect.value = savedView;
@@ -2219,5 +2553,6 @@ if (Array.from(topModeSelect.options).some((option) => option.value === savedTop
   topModeSelect.value = savedTopMode;
 }
 
-Promise.all([loadTags(), loadPublishers(), loadWorks()])
+Promise.all([loadTags(), loadPublishers()])
+  .then(() => loadWorks())
   .catch((error) => flash(error.message, 'error'));

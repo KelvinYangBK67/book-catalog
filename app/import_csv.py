@@ -81,6 +81,7 @@ def _book_from_row(row: dict[str, str | None]) -> BookInput:
             "version": _text(row, "edition_version", "version"),
             "series": _text(row, "edition_series", "series"),
             "translator": _text(row, "edition_responsibility", "translator"),
+            "responsibility": _text(row, "edition_general_responsibility"),
             "other_title": _text(row, "edition_other_title", "other_title"),
             "other_subtitle": _text(row, "edition_other_subtitle", "other_subtitle"),
             "translated_title": _text(row, "edition_translated_title", "translated_title"),
@@ -125,6 +126,7 @@ CSV_V2_FIELD_PATHS = {
     "edition_version": ("edition", "version"),
     "edition_series": ("edition", "series"),
     "edition_responsibility": ("edition", "translator"),
+    "edition_general_responsibility": ("edition", "responsibility"),
     "edition_other_title": ("edition", "other_title"),
     "edition_other_subtitle": ("edition", "other_subtitle"),
     "edition_translated_title": ("edition", "translated_title"),
@@ -430,7 +432,7 @@ def csv_import(payload: CsvImportCommit) -> dict:
             if copy_id is None:
                 raise HTTPException(
                     status_code=422,
-                    detail=f"CSV row {selection.row_number} has no Copy selected",
+                    detail=f"CSV 第 {selection.row_number} 行未選擇實物副本",
                 )
             book = selection.book
             if selection.csv_fields is not None:
@@ -442,7 +444,7 @@ def csv_import(payload: CsvImportCommit) -> dict:
             if not updated:
                 raise HTTPException(
                     status_code=422,
-                    detail=f"Copy #{copy_id} no longer exists",
+                    detail="指定的實物副本已不存在",
                 )
             overwritten_ids.append(copy_id)
         copy_by_row[selection.row_number] = copy_id

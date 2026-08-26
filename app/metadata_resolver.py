@@ -101,9 +101,16 @@ def resolve_append(
             parts.append(part)
             source_parts.append(part)
         if source_parts:
-            sources.append(
-                ResponsibilityPart(value="; ".join(source_parts), source=source)
-            )
+            source_value = "; ".join(source_parts)
+            if sources and sources[-1].source == source:
+                previous = sources[-1]
+                sources[-1] = ResponsibilityPart(
+                    value=f"{previous.value}; {source_value}", source=source
+                )
+            else:
+                sources.append(
+                    ResponsibilityPart(value=source_value, source=source)
+                )
     return ResolvedAppendValue(value="; ".join(parts), sources=tuple(sources))
 
 
@@ -140,6 +147,7 @@ def resolve_metadata(work: Any, edition: Any, volume: Any) -> dict[str, Any]:
     responsibility = resolve_append((
         ("work", _value(work, "authors")),
         ("edition", _value(edition, "translator")),
+        ("edition", _value(edition, "responsibility")),
         ("volume", _value(volume, "responsibility")),
     ))
     return {

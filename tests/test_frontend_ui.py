@@ -9,6 +9,7 @@ HTML = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
 CSS = (ROOT / "static" / "style.css").read_text(encoding="utf-8")
 JS = (ROOT / "static" / "app.js").read_text(encoding="utf-8")
 CATALOG_MODEL = (ROOT / "static" / "catalog-model.js").read_text(encoding="utf-8")
+SPECIAL_TEXT = (ROOT / "static" / "special-text.js").read_text(encoding="utf-8")
 
 
 class FrontendStructureTests(unittest.TestCase):
@@ -20,24 +21,35 @@ class FrontendStructureTests(unittest.TestCase):
         self.assertNotIn("React", HTML + JS)
         self.assertNotIn("Vue", HTML + JS)
 
-    def test_common_single_volume_flow_stays_outside_disclosures(self) -> None:
+    def test_quick_entry_contains_only_daily_fields(self) -> None:
         first_disclosure = HTML.index('<details class="form-disclosure"')
         for name in (
-            "work.title", "work.subtitle", "work.authors", "work.scripts",
-            "work.tags", "edition.publisher", "edition.publication_year",
-            "edition.version", "edition.identifier",
+            "work.title", "work.authors", "work.scripts", "work.tags",
+            "edition.publisher", "copy.location",
         ):
             self.assertLess(HTML.index(f'name="{name}"'), first_disclosure)
-        self.assertIn('name="copy.location"', HTML)
-        self.assertIn('name="copy.acquisition_date"', HTML)
+        for name in (
+            "work.subtitle", "edition.publication_year", "edition.version",
+            "edition.identifier", "edition.title", "edition.subtitle",
+            "edition.series", "edition.edition_scripts",
+            "edition.responsibility", "edition.other_title",
+            "copy.acquisition_date", "copy.reading_record",
+        ):
+            self.assertGreater(HTML.index(f'name="{name}"'), first_disclosure)
 
     def test_low_frequency_fields_are_progressively_disclosed(self) -> None:
         for label in (
-            "更多版本信息", "冊資料", "冊級例外",
-            "其他館藏信息", "進階結構",
+            "更多作品資料", "更多版本資料", "其他館藏資料", "進階結構",
         ):
             self.assertIn(f'data-label="{label}"', HTML)
+        self.assertIn('data-add-volume-fields>＋ 新增冊', HTML)
+        self.assertIn('data-volume-form-fields hidden', HTML)
+        self.assertIn('data-volume-inherits checked', HTML)
+        self.assertIn('data-volume-override-fields hidden', HTML)
+        self.assertNotIn('data-label="冊資料"', HTML)
+        self.assertNotIn('data-label="冊級例外"', HTML)
         self.assertIn("updateDisclosureCounts(form)", JS)
+        self.assertIn("currentForm.addEventListener('input'", JS)
         self.assertIn("details.classList.toggle('has-values'", (
             ROOT / "static" / "components.js"
         ).read_text(encoding="utf-8"))
@@ -46,8 +58,52 @@ class FrontendStructureTests(unittest.TestCase):
         self.assertIn('name="volume.version"', HTML)
         self.assertIn('name="volume.publication_year"', HTML)
         self.assertIn('name="volume.responsibility"', HTML)
-        self.assertIn("version: get('volume.version')", JS)
-        self.assertIn("responsibility: get('volume.responsibility')", JS)
+        self.assertIn("? '' : get('volume.version')", JS)
+        self.assertIn("? '' : get('volume.responsibility')", JS)
+
+    def test_translation_fields_are_conditional_and_responsibilities_are_separate(self) -> None:
+        self.assertEqual(HTML.count("data-translation-toggle"), 2)
+        self.assertEqual(HTML.count("data-translation-fields hidden"), 2)
+        self.assertIn('name="edition.responsibility"', HTML)
+        self.assertIn('name="responsibility"', HTML)
+        self.assertIn("responsibility: get('edition.responsibility')", JS)
+        self.assertIn("updateTranslationFields", JS)
+
+    def test_new_and_edit_forms_share_the_twelve_column_grid(self) -> None:
+        for form_id in (
+            "book-form", "work-edit-form", "edition-edit-form",
+            "volume-edit-form", "copy-edit-form",
+        ):
+            start = HTML.index(f'id="{form_id}"')
+            end = HTML.index("</form>", start)
+            self.assertIn('class="form-grid"', HTML[start:end])
+        self.assertNotIn('class="fields two"', HTML)
+
+    def test_detail_hierarchy_is_progressive_and_add_actions_are_separate(self) -> None:
+        self.assertIn('data-layer-toggle="edition"', JS)
+        self.assertIn('data-layer-toggle="volume"', JS)
+        self.assertIn("data-layer-content hidden", JS)
+        self.assertIn("layerAddButton('work'", JS)
+        self.assertIn("layerAddButton('edition'", JS)
+        self.assertIn("layerAddButton('volume'", JS)
+        work_menu = JS[JS.index("function workMenu"):JS.index("function editionMenu")]
+        edition_menu = JS[JS.index("function editionMenu"):JS.index("function volumeMenu")]
+        volume_menu = JS[JS.index("function volumeMenu"):JS.index("function copyMenu")]
+        self.assertNotIn("add-edition", work_menu)
+        self.assertNotIn("add-volume", edition_menu)
+        self.assertNotIn("add-copy", edition_menu + volume_menu)
+
+    def test_internal_model_names_and_ids_are_not_presented(self) -> None:
+        self.assertNotIn(">Work<", HTML)
+        self.assertNotIn(">Edition<", HTML)
+        self.assertNotIn(">VOLUME<", HTML)
+        self.assertNotIn(">COPY<", HTML)
+        self.assertNotIn("EDITION VIEW", JS)
+        self.assertNotIn("實物副本 #", JS)
+        for function_name in ("function editionTopDisplay", "function editionDisplayData"):
+            block_start = JS.index(function_name)
+            block_end = JS.index("\n}", block_start)
+            self.assertNotIn("版本資料", JS[block_start:block_end])
 
     def test_hierarchy_uses_volume_groups_and_copy_only_details(self) -> None:
         self.assertIn("return (group.volumes || [])", CATALOG_MODEL)
@@ -84,6 +140,35 @@ class FrontendStructureTests(unittest.TestCase):
         self.assertIn("setAllPublishers", JS)
         self.assertIn("tags-collapsed", JS)
 
+    def test_tag_parent_candidates_and_browse_tree_use_real_hierarchy(self) -> None:
+        self.assertIn("function tagDescendantIds", JS)
+        self.assertIn("function legalTagParents", JS)
+        self.assertIn("tag.direct_work_count ?? tag.assigned_work_count", JS)
+        parent_options = JS[JS.index("function tagParentOptions"):JS.index(
+            "function renderPublisherControls"
+        )]
+        self.assertNotIn("disabled", parent_options)
+        self.assertIn("function subtreeWorkIds", JS)
+        self.assertIn("function browseTagTree", JS)
+        self.assertIn("data-browse-tag-toggle", JS)
+        self.assertIn("data-browse-tag-select", JS)
+        self.assertIn("counts.get(tag.id).size", JS)
+
+    def test_work_header_and_edition_summary_are_natural_information_flows(self) -> None:
+        work_detail = JS[JS.index("function renderWorkDetail"):JS.index(
+            "function renderEditionTopDetail"
+        )]
+        self.assertIn("detail-title-scripts", work_detail)
+        self.assertIn("work-detail-meta", work_detail)
+        self.assertNotIn("<small>文種</small>", work_detail)
+        edition_header = JS[JS.index("function editionHeader"):JS.index(
+            "function publisherDisplay"
+        )]
+        self.assertIn("edition-responsibility", edition_header)
+        self.assertIn("edition-bibliography", edition_header)
+        self.assertNotIn("edition-summary-identifiers", edition_header)
+        self.assertNotIn("border-top", edition_header)
+
     def test_compact_and_mobile_layout_rules_exist(self) -> None:
         self.assertIn("min-height: 56px", CSS)
         self.assertIn("grid-template-columns: repeat(12", CSS)
@@ -91,6 +176,40 @@ class FrontendStructureTests(unittest.TestCase):
         self.assertIn("grid-template-columns: repeat(2", CSS)
         self.assertIn("overflow-x: auto", CSS)
         self.assertIn(".action-menu-popover", CSS)
+
+    def test_css_is_consolidated_and_uses_distinct_font_roles(self) -> None:
+        self.assertNotIn("Compact application shell", CSS)
+        self.assertNotIn("Second-pass entry", CSS)
+        self.assertNotIn("min-height: 42px", CSS)
+        self.assertNotIn("height: 43px", CSS)
+        self.assertIn('--ui-font: "Library UI Latin", "Library UI Han"', CSS)
+        self.assertIn(".bibliographic-text, .bibliographic-input", CSS)
+        self.assertIn("font: 14px/1.5 var(--ui-font)", CSS)
+        self.assertIn("min-height: 40px", CSS)
+        self.assertIn("padding: 8px 10px", CSS)
+
+    def test_home_is_tool_focused_and_mobile_actions_are_collapsed(self) -> None:
+        self.assertIn('id="catalog-title">我的藏書', HTML)
+        self.assertNotIn("每一本書，都有它的位置。", HTML)
+        self.assertNotIn("PERSONAL LIBRARY", HTML)
+        self.assertEqual(HTML.count('id="book-count"'), 1)
+        self.assertIn('id="mobile-more-button"', HTML)
+        self.assertIn('id="secondary-actions"', HTML)
+        self.assertIn("function setupMobileActions", JS)
+        self.assertIn(".secondary-actions.is-open", CSS)
+
+    def test_special_script_renderer_is_local_and_keeps_unicode_inputs(self) -> None:
+        vendor = ROOT / "static" / "vendor" / "hierojax"
+        for filename in ("hierojax.js", "hierojax.css", "NewGardiner.otf", "LICENSE", "VENDORED.md"):
+            self.assertTrue((vendor / filename).exists())
+        self.assertIn("/static/vendor/hierojax/hierojax.js", HTML)
+        self.assertNotIn("cdn", HTML.lower())
+        self.assertIn("renderBibliographicText", SPECIAL_TEXT)
+        self.assertIn("window.hierojax.processFragment", SPECIAL_TEXT)
+        self.assertIn("special-text-preview", SPECIAL_TEXT)
+        self.assertIn('import {escapeHtml}', SPECIAL_TEXT)
+        self.assertIn("renderBibliographicText(work.title)", JS)
+        self.assertNotIn("svg", HTML[HTML.index('name="work.title"'):HTML.index('name="work.authors"')])
 
 
 if __name__ == "__main__":

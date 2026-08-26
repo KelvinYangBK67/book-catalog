@@ -43,7 +43,7 @@ SELECT
     v.publication_year_end AS volume_publication_year_end,
     v.responsibility AS volume_responsibility,
     e.id AS edition_id, e.title AS edition_title, e.subtitle AS edition_subtitle,
-    e.identifier, e.translator, e.other_title, e.other_subtitle, e.translated_title,
+    e.identifier, e.translator, e.responsibility, e.other_title, e.other_subtitle, e.translated_title,
     e.translated_subtitle, e.edition_scripts, e.version, e.series, e.publisher,
     e.publisher_id, COALESCE(p.canonical_name, '') AS publisher_canonical,
     e.publication_year, e.publication_year_end,
@@ -87,6 +87,7 @@ def _resolved_metadata_from_book_row(row: Row, work: Row | None = None) -> dict:
             "publication_year": row["publication_year"],
             "publication_year_end": row["publication_year_end"],
             "translator": row["translator"],
+            "responsibility": row["responsibility"],
         },
         {
             "volume_title": row["volume_title"],
@@ -133,6 +134,7 @@ def _book_record(row: Row, connection: Connection) -> dict:
             "publication_year": row["publication_year"],
             "publication_year_end": row["publication_year_end"],
             "translator": row["translator"],
+            "responsibility": row["responsibility"],
         },
         None,
     )
@@ -153,6 +155,7 @@ def _book_record(row: Row, connection: Connection) -> dict:
             "work_relations": _edition_work_relations(connection, row["edition_id"]),
             "identifier": row["identifier"],
             "translator": row["translator"],
+            "responsibility": row["responsibility"],
             "other_title": row["other_title"],
             "other_subtitle": row["other_subtitle"],
             "translated_title": row["translated_title"],
@@ -310,13 +313,13 @@ def _resolve_relation_volume_id(
     if volume_id is None:
         volume_id = fallback_volume_id
     if volume_id is None:
-        raise ValueError("volume relation must reference a Volume id")
+        raise ValueError("分冊關聯必須引用已存在的冊")
     row = connection.execute(
         "SELECT id FROM volumes WHERE id = ? AND edition_id = ?",
         (volume_id, edition_id),
     ).fetchone()
     if not row:
-        raise ValueError("Relation Volume does not belong to this Edition")
+        raise ValueError("關聯的冊不屬於此版本")
     return int(row["id"])
 
 
@@ -351,7 +354,7 @@ def _normalize_edition_work_relations(relations: list) -> list[dict]:
         work_id = int(data["work_id"])
         relation_type = str(data.get("relation_type") or "contained")
         if relation_type not in {"volume", "contained"}:
-            raise ValueError("Edition-Work relation type must be volume or contained")
+            raise ValueError("版本與作品的關聯類型必須是分冊或同冊收錄")
         normalized_relation = {
             "work_id": work_id,
             "relation_type": relation_type,
@@ -406,14 +409,14 @@ def _set_edition_work_relations(
 ) -> None:
     normalized = _normalize_edition_work_relations(relations)
     if not normalized:
-        raise ValueError("Edition 至少需要關聯一個 Work")
+        raise ValueError("版本至少需要關聯一個作品")
     ordered_ids = [relation["work_id"] for relation in normalized]
     placeholders = ",".join("?" for _ in ordered_ids)
     found = connection.execute(
         f"SELECT COUNT(*) FROM works WHERE id IN ({placeholders})", ordered_ids
     ).fetchone()[0]
     if found != len(ordered_ids):
-        raise ValueError("Edition 關聯中包含不存在的 Work")
+        raise ValueError("版本關聯中包含不存在的作品")
     fallback_ids = iter(fallback_volume_ids or [])
     resolved = []
     for relation in normalized:
@@ -478,7 +481,7 @@ def _set_work_edition_relations(
         edition_id = int(data["edition_id"])
         relation_type = str(data.get("relation_type") or "contained")
         if relation_type not in {"volume", "contained"}:
-            raise ValueError("Work–Edition 關聯類型必須是 volume 或 contained")
+            raise ValueError("作品與版本的關聯類型必須是分冊或同冊收錄")
         item = {
             "edition_id": edition_id,
             "relation_type": relation_type,
@@ -501,7 +504,7 @@ def _set_work_edition_relations(
             f"SELECT COUNT(*) FROM editions WHERE id IN ({placeholders})", desired_ids
         ).fetchone()[0]
         if found != len(desired_ids):
-            raise ValueError("Work 關聯中包含不存在的 Edition")
+            raise ValueError("作品關聯中包含不存在的版本")
 
     current_ids = {
         row["edition_id"] for row in connection.execute(
@@ -513,7 +516,7 @@ def _set_work_edition_relations(
             "SELECT COUNT(*) FROM edition_works WHERE edition_id = ?", (edition_id,)
         ).fetchone()[0]
         if link_count <= 1:
-            raise ValueError("不能移除此關聯：Edition 至少需要保留一個 Work")
+            raise ValueError("不能移除此關聯：版本至少需要保留一個作品")
         connection.execute(
             "DELETE FROM edition_works WHERE edition_id = ? AND work_id = ?",
             (edition_id, work_id),
@@ -585,7 +588,7 @@ def _reuse_or_create_edition(
             (edition.existing_edition_id, work_id),
         ).fetchone()
         if not existing:
-            raise ValueError("指定的既有 Edition 不存在或未關聯此 Work")
+            raise ValueError("指定的既有版本不存在或未關聯此作品")
         return int(existing["id"]), existing
 
     publisher_id = _resolve_publisher(
@@ -602,13 +605,13 @@ def _reuse_or_create_edition(
     year_start, year_end = publication_year_bounds(edition.publication_year)
     cursor = connection.execute(
         """INSERT INTO editions
-           (title, subtitle, identifier, translator, other_title, other_subtitle,
+           (title, subtitle, identifier, translator, responsibility, other_title, other_subtitle,
             translated_title, translated_subtitle, edition_scripts, version, series,
             publisher, publisher_id, publication_year, publication_year_end, force_separate)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             edition.title, edition.subtitle, edition.identifier,
-            edition.translator, edition.other_title, edition.other_subtitle,
+            edition.translator, edition.responsibility, edition.other_title, edition.other_subtitle,
             edition.translated_title, edition.translated_subtitle,
             edition.edition_scripts, edition.version, edition.series,
             edition.publisher, publisher_id, year_start, year_end,
@@ -665,7 +668,8 @@ def _volume_from_row(row: Row) -> dict:
             "version": row["edition_version"],
             "publication_year": row["edition_publication_year"],
             "publication_year_end": row["edition_publication_year_end"],
-            "translator": row["edition_responsibility"],
+            "translator": row["edition_translator"],
+            "responsibility": row["edition_responsibility"],
         },
         row,
     )
@@ -717,7 +721,7 @@ def _insert_volume(
         "SELECT 1 FROM volumes WHERE edition_id = ? AND position = ?",
         (edition_id, position),
     ).fetchone():
-        raise ValueError("Volume position already exists in this Edition")
+        raise ValueError("此版本中已有相同的冊排序位置")
     year_start, year_end = publication_year_bounds(volume.publication_year)
     cursor = connection.execute(
         """INSERT INTO volumes
@@ -742,7 +746,7 @@ def _find_or_create_volume(
             (volume.id, edition_id),
         ).fetchone()
         if not row:
-            raise ValueError("Volume does not exist in this Edition")
+            raise ValueError("此冊不存在於指定版本")
         return int(row["id"])
 
     rows = connection.execute(
@@ -764,7 +768,7 @@ def _update_volume_row(
         "SELECT edition_id FROM volumes WHERE id = ?", (volume_id,)
     ).fetchone()
     if not current:
-        raise ValueError("Volume 不存在")
+        raise ValueError("冊不存在")
     year_start, year_end = publication_year_bounds(volume.publication_year)
     position = volume.position
     if position is None:
@@ -777,7 +781,7 @@ def _update_volume_row(
         (current["edition_id"], position, volume_id),
     ).fetchone()
     if conflict:
-        raise ValueError("Volume position 在此 Edition 中已存在")
+        raise ValueError("此版本中已有相同的冊排序位置")
     connection.execute(
         """UPDATE volumes SET position = ?, volume_number = ?, volume_title = ?,
                identifier = ?, version = ?, publication_year = ?,
@@ -1115,7 +1119,8 @@ def get_work(work_id: int, path: Path | None = None) -> dict | None:
             return None
         rows = connection.execute(
             """SELECT e.id AS edition_id, e.title AS edition_title, e.subtitle AS edition_subtitle,
-                      e.identifier, e.translator, e.other_title, e.other_subtitle,
+                      e.identifier, e.translator, e.responsibility,
+                      e.other_title, e.other_subtitle,
                       e.translated_title, e.translated_subtitle, e.edition_scripts,
                       e.version, e.series, e.publisher, e.publisher_id,
                       COALESCE(p.canonical_name, '') AS publisher_canonical,
@@ -1152,6 +1157,7 @@ def get_work(work_id: int, path: Path | None = None) -> dict | None:
                         "work_ids": [int(value) for value in (row["edition_work_ids_csv"] or "").split(",") if value],
                         "work_relations": _edition_work_relations(connection, edition_id),
                         "identifier": row["identifier"], "translator": row["translator"],
+                        "responsibility": row["responsibility"],
                         "other_title": row["other_title"],
                         "other_subtitle": row["other_subtitle"],
                         "translated_title": row["translated_title"],
@@ -1243,12 +1249,13 @@ def update_book(
             year_start, year_end = publication_year_bounds(book.edition.publication_year)
             connection.execute(
                 """UPDATE editions SET title = ?, subtitle = ?, identifier = ?, translator = ?,
+                   responsibility = ?,
                    other_title = ?, other_subtitle = ?, translated_title = ?, translated_subtitle = ?,
                    edition_scripts = ?, version = ?, series = ?, publisher = ?, publisher_id = ?,
                    publication_year = ?, publication_year_end = ? WHERE id = ?""",
                 (
                     book.edition.title, book.edition.subtitle, book.edition.identifier,
-                    book.edition.translator, book.edition.other_title,
+                    book.edition.translator, book.edition.responsibility, book.edition.other_title,
                     book.edition.other_subtitle, book.edition.translated_title,
                     book.edition.translated_subtitle, book.edition.edition_scripts,
                     book.edition.version, book.edition.series, book.edition.publisher,
@@ -1337,11 +1344,13 @@ def update_edition_details(
         year_start, year_end = publication_year_bounds(edition.publication_year)
         connection.execute(
             """UPDATE editions SET title = ?, subtitle = ?, identifier = ?, translator = ?,
+               responsibility = ?,
                other_title = ?, other_subtitle = ?, translated_title = ?, translated_subtitle = ?,
                edition_scripts = ?, version = ?, series = ?, publisher = ?, publisher_id = ?,
                publication_year = ?, publication_year_end = ? WHERE id = ?""",
             (
                 edition.title, edition.subtitle, edition.identifier, edition.translator,
+                edition.responsibility,
                 edition.other_title, edition.other_subtitle, edition.translated_title,
                 edition.translated_subtitle, edition.edition_scripts, edition.version,
                 edition.series, edition.publisher, publisher_id, year_start, year_end,
@@ -1368,7 +1377,8 @@ def get_volume(volume_id: int, path: Path | None = None) -> dict | None:
                       e.version AS edition_version,
                       e.publication_year AS edition_publication_year,
                       e.publication_year_end AS edition_publication_year_end,
-                      e.translator AS edition_responsibility,
+                      e.translator AS edition_translator,
+                      e.responsibility AS edition_responsibility,
                       w.title AS work_title, w.subtitle AS work_subtitle,
                       w.authors AS work_authors, w.scripts AS work_scripts
                FROM volumes v
@@ -1395,7 +1405,7 @@ def create_volume_record(
         if not connection.execute(
             "SELECT 1 FROM editions WHERE id = ?", (edition_id,)
         ).fetchone():
-            raise ValueError("Edition 不存在")
+            raise ValueError("版本不存在")
         volume_id = _insert_volume(connection, edition_id, volume)
     record = get_volume(volume_id, path)
     assert record is not None
@@ -1504,7 +1514,7 @@ def create_copy_for_volume(
         if not connection.execute(
             "SELECT 1 FROM volumes WHERE id = ?", (volume_id,)
         ).fetchone():
-            raise ValueError("Volume 不存在")
+            raise ValueError("冊不存在")
         copy_id = _insert_copy(connection, volume_id, copy)
     record = get_copy_details(copy_id, path)
     assert record is not None
@@ -1524,7 +1534,7 @@ def update_copy_details(
         if not connection.execute(
             "SELECT 1 FROM volumes WHERE id = ?", (volume_id,)
         ).fetchone():
-            raise ValueError("指定的 Volume 不存在")
+            raise ValueError("指定的冊不存在")
         connection.execute(
             """UPDATE copies SET volume_id = ?, acquisition_date = ?,
                location = ?, reading_record = ? WHERE id = ?""",
@@ -1551,15 +1561,15 @@ def move_edition_identifier_to_volume(
             (volume_id, edition_id),
         ).fetchone()
         if not volume:
-            raise ValueError("指定的 Volume 不屬於此 Edition")
+            raise ValueError("指定的冊不屬於此版本")
         edition_identifier = str(edition["identifier"] or "").strip()
         volume_identifier = str(volume["identifier"] or "").strip()
         if not edition_identifier:
-            raise ValueError("Edition 沒有可下沉的識別號")
+            raise ValueError("版本沒有可下沉的識別號")
         if volume_identifier and (
             volume_identifier.casefold() != edition_identifier.casefold()
         ):
-            raise ValueError("Volume 已有不同識別號，請先明確解決衝突")
+            raise ValueError("冊已有不同識別號，請先明確解決衝突")
         connection.execute(
             "UPDATE volumes SET identifier = ? WHERE id = ?",
             (edition_identifier, volume_id),
@@ -1636,7 +1646,7 @@ def delete_volume(volume_id: int, path: Path | None = None) -> dict | None:
         ).fetchone()
         if relation:
             raise ValueError(
-                "此冊仍由 Edition–Work 分冊關聯引用，請先調整進階結構"
+                "此冊仍由版本與作品的分冊關聯引用，請先調整進階結構"
             )
         copy_count = connection.execute(
             "SELECT COUNT(*) FROM copies WHERE volume_id = ?", (volume_id,)

@@ -23,7 +23,8 @@ CSV_FIELDS = [
     "edition_id", "edition_title", "edition_subtitle",
     "edition_work_ids", "edition_work_relations",
     "edition_identifier", "edition_version", "edition_series",
-    "edition_responsibility", "edition_other_title", "edition_other_subtitle",
+    "edition_responsibility", "edition_general_responsibility",
+    "edition_other_title", "edition_other_subtitle",
     "edition_translated_title", "edition_translated_subtitle",
     "edition_scripts", "edition_publisher", "edition_publisher_canonical",
     "edition_publication_year",
@@ -69,7 +70,8 @@ def export_document(path: Path | None = None) -> dict:
                        WHERE ew.edition_id = e.id
                        ORDER BY ew.position LIMIT 1) AS primary_work_id,
                       e.title, e.subtitle,
-                      e.identifier, e.translator, e.other_title, e.other_subtitle,
+                      e.identifier, e.translator, e.responsibility,
+                      e.other_title, e.other_subtitle,
                       e.translated_title, e.translated_subtitle, e.edition_scripts,
                       e.version, e.series, e.publisher, e.publisher_id,
                       e.publication_year, e.publication_year_end, e.force_separate
@@ -196,6 +198,7 @@ def export_csv() -> Response:
             "edition_version": edition["version"],
             "edition_series": edition["series"],
             "edition_responsibility": edition["translator"],
+            "edition_general_responsibility": edition["responsibility"],
             "edition_other_title": edition["other_title"],
             "edition_other_subtitle": edition["other_subtitle"],
             "edition_translated_title": edition["translated_title"],
