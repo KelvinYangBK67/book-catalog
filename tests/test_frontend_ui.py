@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import unittest
 from pathlib import Path
 
@@ -13,7 +14,12 @@ SPECIAL_TEXT = (ROOT / "static" / "special-text.js").read_text(encoding="utf-8")
 IDENTIFIER_VALIDATION = (
     ROOT / "static" / "identifier-validation.js"
 ).read_text(encoding="utf-8")
-FONTS = (ROOT / "static" / "fonts.css").read_text(encoding="utf-8")
+GENERATED = ROOT / "static" / "generated"
+FONTS = (GENERATED / "fonts.css").read_text(encoding="utf-8")
+FONT_ROUTES = (GENERATED / "font-routes.js").read_text(encoding="utf-8")
+FONT_MANIFEST = json.loads(
+    (GENERATED / "font-manifest.json").read_text(encoding="utf-8")
+)
 
 
 class FrontendStructureTests(unittest.TestCase):
@@ -219,9 +225,10 @@ class FrontendStructureTests(unittest.TestCase):
         self.assertNotIn("Second-pass entry", CSS)
         self.assertNotIn("min-height: 42px", CSS)
         self.assertNotIn("height: 43px", CSS)
-        self.assertIn('--ui-font: "Library UI"', CSS)
-        self.assertIn('--book-font: "Library Bibliographic"', CSS)
-        self.assertIn(".bibliographic-text, .bibliographic-input", CSS)
+        self.assertIn("--ui-font: var(--font-sans)", CSS)
+        self.assertIn("--book-font: var(--font-serif)", CSS)
+        self.assertIn("--book-title-font: var(--font-bold)", CSS)
+        self.assertIn(".rendered-text, .bibliographic-input", CSS)
         self.assertIn("font: 14px/1.5 var(--ui-font)", CSS)
         self.assertIn("min-height: 40px", CSS)
         self.assertIn("padding: 8px 10px", CSS)
@@ -245,20 +252,76 @@ class FrontendStructureTests(unittest.TestCase):
         self.assertIn(".form-message", CSS)
         self.assertIn(".identifier-form-warning", CSS)
 
-    def test_impe_fonts_use_two_unicode_range_composite_families(self) -> None:
-        self.assertIn('font-family: "Library UI"', FONTS)
-        self.assertIn('font-family: "Library Bibliographic"', FONTS)
+    def test_impe_catalog_generates_three_explicit_web_roles(self) -> None:
+        self.assertIn("GENERATED FILE — DO NOT EDIT", FONTS)
+        for role in ("Library Sans", "Library Serif", "Library Bold"):
+            self.assertIn(f'font-family: "{role}"', FONTS)
         for path in (
             "/fonts/hindi/NotoSansDevanagari-Regular.ttf",
             "/fonts/tibetan/NotoSerifTibetan-Regular.ttf",
+            "/fonts/tibetan/NotoSerifTibetan-Bold.ttf",
             "/fonts/tangut/NotoSerifTangut-Regular.ttf",
             "/fonts/korean/NotoSansKR-Regular.ttf",
             "/fonts/mongolian/mnglwhiteotf.ttf",
             "/fonts/arabic/NotoNaskhArabic-Regular.ttf",
         ):
             self.assertIn(path, FONTS)
-        self.assertNotIn('font-family: "Library Text"', FONTS)
-        self.assertNotIn('font-family: "Library Sans"', FONTS)
+        self.assertNotIn("Library UI", FONTS + CSS)
+        self.assertNotIn("Library Bibliographic", FONTS + CSS)
+
+    def test_generated_manifest_resolves_fallbacks_and_language_routes(self) -> None:
+        families = FONT_MANIFEST["families"]
+        for family_id in (
+            "libertinus",
+            "chinese_simplified",
+            "chinese_traditional",
+            "japanese",
+            "korean",
+            "tibetan",
+            "devanagari",
+            "arabic",
+            "hebrew",
+            "syriac",
+            "tamil",
+            "thai",
+            "mongolian",
+            "tangut",
+        ):
+            self.assertIn(family_id, families)
+            for role in ("regular", "sans", "bold"):
+                self.assertTrue(families[family_id]["urls"][role])
+        self.assertEqual(
+            FONT_MANIFEST["style_fallbacks"],
+            {
+                "bold": "regular",
+                "italic": "regular",
+                "sans": "regular",
+                "sansbold": "sans",
+                "mono": "regular",
+                "monobold": "mono",
+            },
+        )
+        self.assertEqual(
+            families["tibetan"]["faces"]["bold"],
+            "NotoSerifTibetan-Bold.ttf",
+        )
+        self.assertEqual(
+            families["tangut"]["face_sources"]["bold"],
+            "regular",
+        )
+        self.assertEqual(FONT_MANIFEST["aliases"]["日文"], "japanese")
+        self.assertEqual(
+            FONT_MANIFEST["profile_defaults"]["cjk-tc"],
+            "shanggu",
+        )
+        self.assertIn(
+            '.font-serif[data-font-route="japanese"]',
+            FONTS,
+        )
+        japanese_face = FONTS[FONTS.index('font-family: "IMPE japanese Serif"'):]
+        japanese_face = japanese_face[:japanese_face.index("\n")]
+        self.assertNotIn("unicode-range", japanese_face)
+        self.assertIn("replaceAll('_', '-')", FONT_ROUTES)
 
     def test_home_is_tool_focused_and_mobile_actions_are_collapsed(self) -> None:
         self.assertIn('id="catalog-title">我的藏書', HTML)
@@ -276,11 +339,22 @@ class FrontendStructureTests(unittest.TestCase):
             self.assertTrue((vendor / filename).exists())
         self.assertIn("/static/vendor/hierojax/hierojax.js", HTML)
         self.assertNotIn("cdn", HTML.lower())
-        self.assertIn("renderBibliographicText", SPECIAL_TEXT)
+        self.assertIn("export function renderText", SPECIAL_TEXT)
+        self.assertIn("resolveCatalogFontRoute", SPECIAL_TEXT)
         self.assertIn("window.hierojax.processFragment", SPECIAL_TEXT)
         self.assertIn("special-text-preview", SPECIAL_TEXT)
         self.assertIn('import {escapeHtml}', SPECIAL_TEXT)
-        self.assertIn("renderBibliographicText(work.title)", JS)
+        self.assertIn("bibliographicTitle(work.title, work.scripts)", JS)
+        self.assertNotIn("renderBibliographicText", SPECIAL_TEXT + JS)
+        field_set = SPECIAL_TEXT[
+            SPECIAL_TEXT.index("const BIBLIOGRAPHIC_FIELD_NAMES"):
+            SPECIAL_TEXT.index("const PREVIEW_FIELD_NAMES")
+        ]
+        for non_bibliographic in (
+            "location", "reading_record", "tags", "publisher",
+            "edition_scripts", "scripts",
+        ):
+            self.assertNotIn(f'"{non_bibliographic}"', field_set)
         self.assertNotIn("svg", HTML[HTML.index('name="work.title"'):HTML.index('name="work.authors"')])
 
 

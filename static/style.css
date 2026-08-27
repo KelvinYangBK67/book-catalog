@@ -12,8 +12,9 @@
   --success-bg: #e8f2e9;
   --error-bg: #f8e5df;
   --shadow: 0 16px 44px rgba(46, 39, 28, .15);
-  --ui-font: "Library UI", "Segoe UI", sans-serif;
-  --book-font: "Library Bibliographic", "Times New Roman", serif;
+  --ui-font: var(--font-sans);
+  --book-font: var(--font-serif);
+  --book-title-font: var(--font-bold);
   --control-height: 36px;
   --radius: 3px;
 }
@@ -31,14 +32,13 @@ button, input, textarea, select { font: inherit; }
 button { cursor: pointer; }
 button:disabled { cursor: wait; opacity: .58; }
 a { color: inherit; }
-.bibliographic-text, .bibliographic-input { font-family: var(--book-font); }
-.bibliographic-text {
+.rendered-text, .bibliographic-input { unicode-bidi: plaintext; }
+.rendered-text {
   line-height: 1.55;
-  unicode-bidi: plaintext;
   overflow-wrap: anywhere;
   overflow: visible;
 }
-input.bibliographic-input, textarea.bibliographic-input, select.bibliographic-input {
+input.bibliographic-input, textarea.bibliographic-input {
   height: auto;
   min-height: 40px;
   padding-block: 7px;
@@ -85,7 +85,7 @@ input.bibliographic-input, textarea.bibliographic-input, select.bibliographic-in
   color: var(--paper);
   background: var(--ink);
   border: 1px solid var(--ink);
-  font-family: var(--book-font);
+  font-family: var(--ui-font);
   font-size: 14px;
 }
 .brand strong, .brand small { display: block; line-height: 1.2; }
@@ -354,7 +354,7 @@ input.bibliographic-input, textarea.bibliographic-input, select.bibliographic-in
   border-bottom: 1px solid var(--line);
 }
 .dialog-header h2 { margin: 1px 0 0; font-size: 20px; font-weight: 600; line-height: 1.25; }
-.dialog-header h2 .bibliographic-text { line-height: 1.55; }
+.dialog-header h2 .rendered-text { line-height: 1.55; }
 .dialog-actions {
   position: sticky;
   bottom: 0;
@@ -556,7 +556,7 @@ input:focus, textarea:focus, select:focus {
   border-left: 2px solid var(--green);
 }
 .special-text-preview > small { color: var(--muted); font: 10px var(--ui-font); }
-.special-text-preview .bibliographic-text { min-height: 24px; font-size: 18px; line-height: 1.35; }
+.special-text-preview .rendered-text { min-height: 24px; font-size: 18px; line-height: 1.35; }
 .hierojax[data-special-source="egyptian"] { max-width: 100%; }
 .hierojax[data-special-source="egyptian"] svg { max-width: 100%; height: auto; overflow: visible; }
 
@@ -780,7 +780,7 @@ input:focus, textarea:focus, select:focus {
 .details dt { color: var(--muted); font-size: 10px; }
 .details dd { margin: 1px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; }
 .breadcrumb { margin: 0 0 7px; color: var(--muted); font-size: 11px; }
-.breadcrumb .bibliographic-text { display: inline; }
+.breadcrumb .rendered-text { display: inline; }
 .copy-detail-card {
   position: relative;
   margin: 10px 16px 14px;

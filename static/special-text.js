@@ -1,26 +1,44 @@
 import {escapeHtml} from "./formatters.js";
+import {resolveCatalogFontRoute} from "./generated/font-routes.js";
 
-const EGYPTIAN_CHARACTER = /[𓀀-𔏿]/u;
-const EGYPTIAN_RUN = /([𓀀-𔏿︀-️]+)/gu;
-const BIBLIOGRAPHIC_FIELD = /(?:^|\.)(?:title|subtitle|translated_title|translated_subtitle|other_title|other_subtitle|volume_title|authors|scripts|edition_scripts|publisher|series|responsibility|translator|location|reading_record|tag_names?|tags)$/;
-const PREVIEW_FIELD = /(?:^|\.)(?:title|subtitle|translated_title|translated_subtitle|other_title|other_subtitle|volume_title)$/;
+const EGYPTIAN_CHARACTER = /[\u{13000}-\u{1345F}]/u;
+const EGYPTIAN_RUN = /([\u{13000}-\u{1345F}\uFE00-\uFE0F]+)/gu;
+const TEXT_FAMILIES = new Set(["sans", "serif", "bold"]);
+const BIBLIOGRAPHIC_FIELD_NAMES = new Set([
+  "title",
+  "subtitle",
+  "translated_title",
+  "translated_subtitle",
+  "other_title",
+  "other_subtitle",
+  "volume_title",
+  "authors",
+  "series",
+  "responsibility",
+  "translator"
+]);
+const PREVIEW_FIELD_NAMES = new Set([
+  "title",
+  "subtitle",
+  "translated_title",
+  "translated_subtitle",
+  "other_title",
+  "other_subtitle",
+  "volume_title"
+]);
 const BIBLIOGRAPHIC_SELECTOR = [
-  ".bibliographic-input",
-  ".tag-picker-input",
   "[data-identity-control]",
   "[data-work-search-title]",
   "[data-work-search-subtitle]",
   "[data-work-search-authors]",
   "[data-edition-search-title]",
-  "[data-edition-search-subtitle]",
-  "[data-edition-search-publisher]",
-  "#tag-name",
-  "#tag-edit-name",
-  "#tag-parent",
-  "#tag-edit-parent",
-  "#publisher-canonical-name"
+  "[data-edition-search-subtitle]"
 ].join(",");
 let renderQueued = false;
+
+function fieldName(control) {
+  return String(control.name || "").split(".").pop();
+}
 
 export function containsEgyptianText(value) {
   return EGYPTIAN_CHARACTER.test(String(value || ""));
@@ -39,21 +57,31 @@ function renderTextRuns(value) {
   return html + escapeHtml(source.slice(offset));
 }
 
-export function renderBibliographicText(value, options = {}) {
-  const tag = options.tag || "span";
-  const className = ["bibliographic-text", options.className || ""].filter(Boolean).join(" ");
-  return "<" + tag + ' class="' + className + '" dir="auto">'
-    + renderTextRuns(value) + "</" + tag + ">";
+export function renderText(value, options = {}) {
+  const tag = /^[a-z][a-z0-9-]*$/i.test(options.tag || "")
+    ? options.tag : "span";
+  const family = TEXT_FAMILIES.has(options.family) ? options.family : "serif";
+  const route = resolveCatalogFontRoute(options.script);
+  const className = [
+    "rendered-text",
+    "font-" + family,
+    options.className || ""
+  ].filter(Boolean).join(" ");
+  const routeAttribute = route
+    ? ' data-font-route="' + escapeHtml(route) + '"' : "";
+  return "<" + tag + ' class="' + escapeHtml(className) + '" dir="auto"'
+    + routeAttribute + ">" + renderTextRuns(value) + "</" + tag + ">";
 }
 
 function processPendingHieroglyphs() {
   renderQueued = false;
   if (!window.hierojax) return;
-  document.querySelectorAll('.hierojax[data-special-source="egyptian"]:not([data-special-rendered])')
-    .forEach((node) => {
-      node.dataset.specialRendered = "true";
-      window.hierojax.processFragment(node);
-    });
+  document.querySelectorAll(
+    '.hierojax[data-special-source="egyptian"]:not([data-special-rendered])'
+  ).forEach((node) => {
+    node.dataset.specialRendered = "true";
+    window.hierojax.processFragment(node);
+  });
 }
 
 export function scheduleSpecialTextRender() {
@@ -63,18 +91,39 @@ export function scheduleSpecialTextRender() {
 }
 
 function isBibliographicInput(control) {
-  return control.matches("input, textarea, select")
-    && (BIBLIOGRAPHIC_FIELD.test(control.name || "") || control.matches(BIBLIOGRAPHIC_SELECTOR));
+  return control.matches("input, textarea")
+    && (
+      BIBLIOGRAPHIC_FIELD_NAMES.has(fieldName(control))
+      || control.matches(BIBLIOGRAPHIC_SELECTOR)
+    );
 }
 
 function supportsSpecialPreview(control) {
-  return PREVIEW_FIELD.test(control.name || "")
-    || control.matches('[data-identity-control="title"], [data-identity-control="subtitle"]');
+  return PREVIEW_FIELD_NAMES.has(fieldName(control))
+    || control.matches(
+      '[data-identity-control="title"], [data-identity-control="subtitle"]'
+    );
+}
+
+function scriptMetadataFor(control) {
+  const form = control.closest("form");
+  if (!form) return "";
+  const fields = [
+    "edition.edition_scripts",
+    "work.scripts",
+    "edition_scripts",
+    "scripts"
+  ];
+  for (const name of fields) {
+    const value = form.elements.namedItem(name)?.value?.trim();
+    if (value) return value;
+  }
+  return "";
 }
 
 function updateInputPreview(control) {
   if (!isBibliographicInput(control)) return;
-  control.classList.add("bibliographic-input");
+  control.classList.add("font-serif", "bibliographic-input");
   if (!supportsSpecialPreview(control)) return;
   const label = control.closest("label");
   if (!label) return;
@@ -88,19 +137,23 @@ function updateInputPreview(control) {
     preview.className = "special-text-preview";
     label.appendChild(preview);
   }
-  preview.innerHTML = '<small>預覽</small>' + renderBibliographicText(control.value, {tag: "div"});
+  preview.innerHTML = '<small>預覽</small>' + renderText(control.value, {
+    tag: "div",
+    family: "serif",
+    script: scriptMetadataFor(control)
+  });
   scheduleSpecialTextRender();
 }
 
 export function initializeSpecialTextRenderer() {
-  document.querySelectorAll("input, textarea, select").forEach(updateInputPreview);
+  document.querySelectorAll("input, textarea").forEach(updateInputPreview);
   document.addEventListener("input", (event) => updateInputPreview(event.target));
   const observer = new MutationObserver((records) => {
     for (const record of records) {
       for (const node of record.addedNodes) {
         if (!(node instanceof Element)) continue;
-        if (node.matches("input, textarea, select")) updateInputPreview(node);
-        node.querySelectorAll?.("input, textarea, select").forEach(updateInputPreview);
+        if (node.matches("input, textarea")) updateInputPreview(node);
+        node.querySelectorAll?.("input, textarea").forEach(updateInputPreview);
       }
     }
     scheduleSpecialTextRender();

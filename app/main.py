@@ -31,7 +31,10 @@ from .schemas import (
 
 ROOT = Path(__file__).resolve().parent.parent
 STATIC = ROOT / "static"
-IMPE_FONTS = Path(os.getenv("LIBRARY_FONT_ROOT", r"D:\Repositories\IMPE\assets\fonts"))
+IMPE_ROOT = Path(os.getenv("LIBRARY_IMPE_ROOT", ROOT.parent / "IMPE"))
+IMPE_FONTS = Path(
+    os.getenv("LIBRARY_FONT_ROOT", IMPE_ROOT / "assets" / "fonts")
+)
 mimetypes.add_type("font/ttf", ".ttf")
 mimetypes.add_type("font/otf", ".otf")
 mimetypes.add_type("font/woff2", ".woff2")
@@ -55,8 +58,6 @@ if IMPE_FONTS.is_dir():
 @app.get("/", include_in_schema=False)
 def index() -> HTMLResponse:
     html = (STATIC / "index.html").read_text(encoding="utf-8")
-    if not IMPE_FONTS.is_dir():
-        html = html.replace('  <link rel="stylesheet" href="/static/fonts.css?v=1.0.5">\n', "")
     return HTMLResponse(html, headers={"Cache-Control": "no-cache"})
 
 

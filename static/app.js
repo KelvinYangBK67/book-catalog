@@ -6,9 +6,21 @@ import {
 import {escapeHtml, splitTerms} from "./formatters.js";
 import {editionRelations, groupCopies, groupedVolumes} from "./catalog-model.js";
 import {
-  initializeSpecialTextRenderer, renderBibliographicText
+  initializeSpecialTextRenderer, renderText
 } from "./special-text.js";
 import {identifierWarnings, renderIdentifiers} from "./identifier-validation.js";
+
+function interfaceText(value) {
+  return renderText(value, {family: "sans"});
+}
+
+function bibliographicText(value, script = "") {
+  return renderText(value, {family: "serif", script});
+}
+
+function bibliographicTitle(value, script = "") {
+  return renderText(value, {family: "bold", script});
+}
 
 const list = document.querySelector('#book-list');
 const count = document.querySelector('#book-count');
@@ -131,10 +143,10 @@ function renderTagPicker(picker) {
   const selectedTags = stores.ids.map((id) => tags.find((tag) => tag.id === id)).filter(Boolean);
   picker.querySelector('.tag-picker-chips').innerHTML = [
     ...selectedTags.map((tag) =>
-      '<button class="tag-picker-chip" type="button" data-remove-tag-id="' + tag.id + '" title="' + escapeHtml(tag.path) + '">' + renderBibliographicText(tag.name) + '<span>×</span></button>'
+      '<button class="tag-picker-chip" type="button" data-remove-tag-id="' + tag.id + '" title="' + escapeHtml(tag.path) + '">' + interfaceText(tag.name) + '<span>×</span></button>'
     ),
     ...stores.names.map((name, index) =>
-      '<button class="tag-picker-chip pending" type="button" data-remove-tag-name="' + index + '">' + renderBibliographicText(name) + '<span>×</span></button>'
+      '<button class="tag-picker-chip pending" type="button" data-remove-tag-name="' + index + '">' + interfaceText(name) + '<span>×</span></button>'
     )
   ].join('');
 }
@@ -159,8 +171,8 @@ function renderTagSuggestions(picker) {
     .slice(0, 12);
   suggestions.innerHTML = candidates.map((tag) => {
     const ancestors = tagAncestors(tag);
-    return '<button type="button" data-pick-tag-id="' + tag.id + '"><strong>' + renderBibliographicText(tag.name) + '</strong>'
-      + (ancestors ? '<small>' + renderBibliographicText(ancestors) + '</small>' : '') + '</button>';
+    return '<button type="button" data-pick-tag-id="' + tag.id + '"><strong>' + interfaceText(tag.name) + '</strong>'
+      + (ancestors ? '<small>' + interfaceText(ancestors) + '</small>' : '') + '</button>';
   }).join('') || '<span class="tag-picker-empty">按 Enter 建立新標籤</span>';
   suggestions.hidden = false;
 }
@@ -198,7 +210,7 @@ function renderTagTree(parentId = null) {
       ? '<button class="tag-tree-toggle" type="button" data-tag-toggle aria-expanded="' + String(!collapsed) + '" aria-label="切換下級">▾</button>'
       : '<span class="tag-tree-leaf" aria-hidden="true"></span>';
     return '<li class="tag-tree-node' + (descendants && collapsed ? ' is-collapsed' : '') + '"><div class="tag-tree-row">' + toggle
-      + '<span class="tag-tree-label"><strong>' + renderBibliographicText(tag.name) + '</strong><small>'
+      + '<span class="tag-tree-label"><strong>' + interfaceText(tag.name) + '</strong><small>'
       + (tag.has_children ? '分類' : tag.assigned_work_count + ' 部作品') + '</small></span>'
       + '<button class="quiet-button danger-item" type="button" data-delete-tag="' + tag.id + '">刪除</button></div>'
       + descendants + '</li>';
@@ -421,7 +433,7 @@ function renderPublisherControls() {
   document.querySelector('#publisher-existing-names').innerHTML = publisherNames
     .map((name) => `<label class="publisher-name-option">
       <input type="checkbox" value="${escapeHtml(name)}">
-      <span>${renderBibliographicText(name)}</span>
+      <span>${interfaceText(name)}</span>
     </label>`).join('') || '<span class="tag-empty">尚無可歸併的出版社名稱</span>';
   document.querySelector('#publisher-suggestions').innerHTML = publishers.flatMap((publisher) =>
     publisher.aliases.map((alias) => `<option value="${escapeHtml(alias)}">${escapeHtml(publisher.canonical_name)}</option>`)
@@ -431,11 +443,11 @@ function renderPublisherControls() {
     ? publishers.map((publisher) => `
       <div class="publisher-row${collapsed ? ' is-collapsed' : ''}" data-publisher-row>
         <button class="publisher-summary" type="button" data-publisher-toggle aria-expanded="${String(!collapsed)}">
-          <strong>${renderBibliographicText(publisher.canonical_name)}</strong>
+          <strong>${interfaceText(publisher.canonical_name)}</strong>
           <span>${publisher.aliases.length} 個名稱</span><b aria-hidden="true">›</b>
         </button>
         <div class="publisher-aliases">${publisher.aliases.map((alias) =>
-          `<span class="tag-chip">${renderBibliographicText(alias)}</span>`).join('')}</div>
+          `<span class="tag-chip">${interfaceText(alias)}</span>`).join('')}</div>
         <button class="quiet-button danger-item publisher-delete" type="button"
           data-delete-publisher="${publisher.id}">刪除正規型</button>
       </div>`).join('')
@@ -443,7 +455,7 @@ function renderPublisherControls() {
 }
 
 function tagChips(items) {
-  return items?.length ? '<span class="tag-chips">' + items.map((tag) => '<span class="tag-chip">' + renderBibliographicText(tag.name) + '</span>').join('') + '</span>' : '';
+  return items?.length ? '<span class="tag-chips">' + items.map((tag) => '<span class="tag-chip">' + interfaceText(tag.name) + '</span>').join('') + '</span>' : '';
 }
 
 function groupAnchor(index) {
@@ -601,7 +613,7 @@ function browseTagTree(parentId, counts) {
       + '<div class="browse-tag-row">' + toggle
       + '<button type="button" class="browse-tag-select'
       + (selectedBrowseTagId === tag.id ? ' is-selected' : '')
-      + '" data-browse-tag-select="' + tag.id + '"><span>' + renderBibliographicText(tag.name)
+      + '" data-browse-tag-select="' + tag.id + '"><span>' + interfaceText(tag.name)
       + '</span><small>' + counts.get(tag.id).size + '</small></button></div>'
       + (descendants ? '<div class="browse-tag-branch">' + descendants + '</div>' : '')
       + '</li>';
@@ -715,8 +727,8 @@ function renderTopRows(items) {
 function renderWorkRow(work) {
   return `
     <button class="work-row" type="button" data-work-id="${work.id}">
-      <span class="work-title"><strong>${renderBibliographicText(work.title)}</strong>${work.subtitle ? `<small>${renderBibliographicText(work.subtitle)}</small>` : ''}${tagChips(work.tags)}</span>
-      <span class="cell"><span class="cell-label">作者或相關責任人</span>${work.authors ? renderBibliographicText(work.authors) : '—'}</span>
+      <span class="work-title"><strong>${bibliographicTitle(work.title, work.scripts)}</strong>${work.subtitle ? `<small>${bibliographicText(work.subtitle, work.scripts)}</small>` : ''}${tagChips(work.tags)}</span>
+      <span class="cell"><span class="cell-label">作者或相關責任人</span>${work.authors ? bibliographicText(work.authors, work.scripts) : '—'}</span>
       <span class="cell stat"><b>${work.edition_count}</b><small>版本</small></span>
       <span class="cell stat"><b>${work.copy_count}</b><small>實物副本</small></span>
       <span class="arrow">›</span>
@@ -733,11 +745,14 @@ function editionStructureLabel(entry) {
 }
 
 function renderEditionTopRow(entry) {
-  const relatedTitles = entry.related_works.map((work) => work.title).join(' · ');
+  const scripts = entry.effective_scripts.join('; ');
+  const relatedTitles = entry.related_works
+    .map((work) => bibliographicText(work.title, work.scripts))
+    .join(' · ');
   return `
     <button class="work-row edition-top-row" type="button" data-edition-top-id="${entry.id}">
-      <span class="work-title"><small class="top-kind">版本</small><strong>${renderBibliographicText(entry.title)}</strong>${entry.subtitle ? `<small>${renderBibliographicText(entry.subtitle)}</small>` : ''}${tagChips(entry.tags)}</span>
-      <span class="cell"><span class="cell-label">關聯作品</span>${shown(relatedTitles)}</span>
+      <span class="work-title"><small class="top-kind">版本</small><strong>${bibliographicTitle(entry.title, scripts)}</strong>${entry.subtitle ? `<small>${bibliographicText(entry.subtitle, scripts)}</small>` : ''}${tagChips(entry.tags)}</span>
+      <span class="cell"><span class="cell-label">關聯作品</span>${relatedTitles || '—'}</span>
       <span class="cell stat structure-stat"><b>${escapeHtml(editionStructureLabel(entry))}</b><small>結構</small></span>
       <span class="cell stat"><b>${entry.copy_count}</b><small>實物副本</small></span>
       <span class="arrow">›</span>
@@ -983,13 +998,13 @@ function editionHeader(group, options = {}) {
     ...identifiers.map((value) => renderIdentifiers(value, ''))
   ].filter(Boolean);
   const title = display.title
-    ? renderBibliographicText(display.title)
-    : '<span class="bibliographic-text">未題名版本</span>';
+    ? bibliographicTitle(display.title, scripts)
+    : interfaceText('未題名版本');
   return '<span class="edition-summary">'
     + '<span class="edition-summary-main"><span class="edition-title-line"><strong>' + title + '</strong>'
     + (scripts ? '<span class="edition-script">[' + escapeHtml(scripts) + ']</span>' : '') + '</span>'
-    + (display.subtitle ? '<small class="edition-subtitle">' + renderBibliographicText(display.subtitle) + '</small>' : '')
-    + (responsibilities.length ? '<small class="edition-responsibility">' + responsibilities.map((value) => renderBibliographicText(value)).join(' · ') + '</small>' : '')
+    + (display.subtitle ? '<small class="edition-subtitle">' + bibliographicText(display.subtitle, scripts) + '</small>' : '')
+    + (responsibilities.length ? '<small class="edition-responsibility">' + responsibilities.map((value) => bibliographicText(value, scripts)).join(' · ') + '</small>' : '')
     + (bibliography.length ? '<small class="edition-bibliography">' + bibliography.join(' · ') + '</small>' : '')
     + '</span>'
     + '<span class="edition-count">' + editionHoldingLabel(group) + '</span>'
@@ -999,11 +1014,11 @@ function editionHeader(group, options = {}) {
 
 function publisherDisplay(edition) {
   if (edition.publisher && edition.publisher_canonical && edition.publisher !== edition.publisher_canonical) {
-    return renderBibliographicText(edition.publisher)
-      + '（' + renderBibliographicText(edition.publisher_canonical) + '）';
+    return interfaceText(edition.publisher)
+      + '（' + interfaceText(edition.publisher_canonical) + '）';
   }
   const value = edition.publisher_canonical || edition.publisher;
-  return value ? renderBibliographicText(value) : '';
+  return value ? interfaceText(value) : '';
 }
 
 
@@ -1012,10 +1027,10 @@ function volumePlainName(volume, fallback = '單冊') {
   return [volume.volume_number, volume.volume_title].filter(Boolean).join(' · ') || fallback;
 }
 
-function volumeName(volume, fallback = '單冊') {
+function volumeName(volume, fallback = '單冊', script = '') {
   const parts = [];
   if (volume.volume_number) parts.push(escapeHtml(volume.volume_number));
-  if (volume.volume_title) parts.push(renderBibliographicText(volume.volume_title));
+  if (volume.volume_title) parts.push(bibliographicTitle(volume.volume_title, script));
   return parts.length ? parts.join(' · ') : fallback;
 }
 
@@ -1051,7 +1066,7 @@ function copyRows(copies) {
   return copies.map((copy) => {
     const values = [
       copy.location
-        ? '<span><small>藏書位置</small>' + renderBibliographicText(copy.location) + '</span>' : '',
+        ? '<span><small>藏書位置</small>' + interfaceText(copy.location) + '</span>' : '',
       copy.acquisition_date
         ? '<span><small>取得日期</small>' + escapeHtml(copy.acquisition_date) + '</span>' : '',
       copy.reading_record
@@ -1086,7 +1101,7 @@ function volumeOverrideSummary(volume) {
   if (volume.publication_year) metadata.push(escapeHtml(volume.publication_year));
   if (volume.responsibility) {
     const effective = volume.effective_metadata?.responsibility?.value;
-    metadata.push(renderBibliographicText(effective || volume.responsibility));
+    metadata.push(bibliographicText(effective || volume.responsibility, volume.effective_metadata?.scripts?.value || ''));
   }
   const identifiers = splitTerms(volume.identifier);
   return {
@@ -1111,7 +1126,11 @@ function renderVolumeContent(group) {
         + layerAddButton('edition', group.id, 'add-copy-' + volume.id, '新增實物副本')
         + '</div></div>';
     }
-    const title = volumeName(volume, volumes.length === 1 ? '單冊' : '未標冊號');
+    const title = volumeName(
+      volume,
+      volumes.length === 1 ? '單冊' : '未標冊號',
+      volume.effective_metadata?.scripts?.value || effectiveEditionScripts(group.effective_metadata)
+    );
     return '<section class="volume-card layer-disclosure" data-volume-id="' + volume.id
       + '" data-layer-disclosure>'
       + '<div class="layer-summary-row"><button class="layer-summary-toggle" type="button"'
@@ -1129,17 +1148,18 @@ function renderVolumeContent(group) {
   }).join('');
 }
 
-function renderPairedTitleDetail(label, pairs) {
+function renderPairedTitleDetail(label, pairs, script = '') {
   if (!pairs.length) return '';
   return '<div class="edition-detail-item title-pair-detail"><small>' + label + '</small>'
     + '<div class="edition-title-pairs">' + pairs.map((pair) =>
-      '<div class="edition-title-pair">' + (pair.title ? '<strong>' + renderBibliographicText(pair.title) + '</strong>' : '')
-      + (pair.subtitle ? '<span>' + renderBibliographicText(pair.subtitle) + '</span>' : '') + '</div>'
+      '<div class="edition-title-pair">' + (pair.title ? '<strong>' + bibliographicTitle(pair.title, script) + '</strong>' : '')
+      + (pair.subtitle ? '<span>' + bibliographicText(pair.subtitle, script) + '</span>' : '') + '</div>'
     ).join('') + '</div></div>';
 }
 
 function renderEditionBody(group) {
   const edition = group.edition;
+  const scripts = effectiveEditionScripts(group.effective_metadata);
   const usedFields = editionSummaryData(group).usedFields;
   const details = [];
   const relations = editionRelations(edition).map((relation) => ({
@@ -1152,20 +1172,20 @@ function renderEditionBody(group) {
     details.push('<div class="edition-detail-item title-pair-detail"><small>' + label + '</small>'
       + '<ol class="edition-related-works relation-' + type + '">' + members.map((relation) => {
         const work = relation.work;
-        return '<li><strong>' + renderBibliographicText(work?.title || '未命名作品') + '</strong>'
-          + (work?.authors ? '<span>' + renderBibliographicText(work.authors) + '</span>' : '') + '</li>';
+        return '<li><strong>' + bibliographicTitle(work?.title || '未命名作品', work?.scripts || '') + '</strong>'
+          + (work?.authors ? '<span>' + bibliographicText(work.authors, work?.scripts || '') + '</span>' : '') + '</li>';
       }).join('') + '</ol></div>');
   }
-  if (edition.series) details.push('<div class="edition-detail-item"><small>系列</small><span>' + renderBibliographicText(edition.series) + '</span></div>');
-  if (edition.responsibility && !usedFields.has('responsibility')) details.push('<div class="edition-detail-item"><small>版本責任人</small><span>' + renderBibliographicText(edition.responsibility) + '</span></div>');
-  if (edition.translator && !usedFields.has('translator')) details.push('<div class="edition-detail-item"><small>譯者或相關責任人</small><span>' + renderBibliographicText(edition.translator) + '</span></div>');
-  if (edition.edition_scripts && !usedFields.has('edition_scripts')) details.push('<div class="edition-detail-item"><small>文種</small><span>' + renderBibliographicText(edition.edition_scripts) + '</span></div>');
-  const otherTitles = renderPairedTitleDetail('其他題名', pairedTitleItems(edition.other_title, edition.other_subtitle));
+  if (edition.series) details.push('<div class="edition-detail-item"><small>系列</small><span>' + bibliographicText(edition.series, scripts) + '</span></div>');
+  if (edition.responsibility && !usedFields.has('responsibility')) details.push('<div class="edition-detail-item"><small>版本責任人</small><span>' + bibliographicText(edition.responsibility, scripts) + '</span></div>');
+  if (edition.translator && !usedFields.has('translator')) details.push('<div class="edition-detail-item"><small>譯者或相關責任人</small><span>' + bibliographicText(edition.translator, scripts) + '</span></div>');
+  if (edition.edition_scripts && !usedFields.has('edition_scripts')) details.push('<div class="edition-detail-item"><small>文種</small><span>' + interfaceText(edition.edition_scripts) + '</span></div>');
+  const otherTitles = renderPairedTitleDetail('其他題名', pairedTitleItems(edition.other_title, edition.other_subtitle), scripts);
   if (otherTitles) details.push(otherTitles);
   const translated = renderPairedTitleDetail('翻譯題名', pairedTitleItems(
     usedFields.has('translated_title') ? '' : edition.translated_title,
     usedFields.has('translated_subtitle') ? '' : edition.translated_subtitle
-  ));
+  ), scripts);
   if (translated) details.push(translated);
   const metadata = details.length
     ? '<div class="edition-detail-grid">' + details.join('') + '</div>' : '';
@@ -1180,17 +1200,17 @@ function renderEditionBody(group) {
 function renderWorkDetail(work) {
   const title = document.querySelector('#detail-title');
   const scriptLabel = splitTerms(work.work.scripts).join(' · ');
-  title.innerHTML = renderBibliographicText(work.work.title)
+  title.innerHTML = bibliographicTitle(work.work.title, work.work.scripts)
     + (scriptLabel ? ' <span class="detail-title-scripts">[' + escapeHtml(scriptLabel) + ']</span>' : '');
   const detailSubtitle = document.querySelector('#detail-subtitle');
   detailSubtitle.innerHTML = work.work.subtitle
-    ? renderBibliographicText(work.work.subtitle) : '';
+    ? bibliographicText(work.work.subtitle, work.work.scripts) : '';
   detailSubtitle.hidden = !work.work.subtitle;
   const author = work.work.authors
-    ? '<p class="work-detail-author">' + renderBibliographicText(work.work.authors) + '</p>' : '';
+    ? '<p class="work-detail-author">' + bibliographicText(work.work.authors, work.work.scripts) + '</p>' : '';
   const assignedTags = tags.filter((tag) => work.work.tag_ids.includes(tag.id));
   const summaryParts = [
-    ...assignedTags.map((tag) => renderBibliographicText(tag.name)),
+    ...assignedTags.map((tag) => interfaceText(tag.name)),
     work.editions.length + ' 個版本',
     work.editions.reduce((sum, item) => sum + groupCopies(item).length, 0) + ' 份實物副本'
   ];
@@ -1222,11 +1242,11 @@ function renderEditionTopDetail() {
   activeWork = {...activeWork, editions: [group]};
   const display = editionTopDisplay(entry);
   const scripts = splitTerms(effectiveEditionScripts(group.effective_metadata)).join(' · ');
-  document.querySelector('#detail-title').innerHTML = renderBibliographicText(display.title || '未題名版本')
+  document.querySelector('#detail-title').innerHTML = bibliographicTitle(display.title || '未題名版本', scripts)
     + (scripts ? ' <span class="detail-title-scripts">[' + escapeHtml(scripts) + ']</span>' : '');
   const detailSubtitle = document.querySelector('#detail-subtitle');
   detailSubtitle.innerHTML = display.subtitle
-    ? renderBibliographicText(display.subtitle) : '';
+    ? bibliographicText(display.subtitle, scripts) : '';
   detailSubtitle.hidden = !display.subtitle;
   document.querySelector('#detail-content').innerHTML =
     '<section class="edition-top-overview"><p class="eyebrow">版本</p>'
@@ -1312,8 +1332,8 @@ async function openCopy(copyId) {
     document.querySelector('#copy-detail-title').textContent = '館藏資料';
     document.querySelector('#copy-detail-content').innerHTML =
       '<section class="copy-detail-card">' + copyMenu(activeCopy)
-      + '<p class="breadcrumb">' + renderBibliographicText(activeWork?.work?.title || '')
-      + (editionTitle ? ' › ' + renderBibliographicText(editionTitle) : '')
+      + '<p class="breadcrumb">' + bibliographicText(activeWork?.work?.title || '', activeWork?.work?.scripts || '')
+      + (editionTitle ? ' › ' + bibliographicText(editionTitle, effectiveEditionScripts(group?.effective_metadata || {})) : '')
       + (volumeTitle ? ' › ' + volumeTitle : '') + '</p>'
       + (detailRows ? '<dl class="copy-detail-list">' + detailRows + '</dl>' : '')
       + '</section>';
@@ -1618,9 +1638,9 @@ function renderWorkRelationCandidates(editor) {
   results.hidden = false;
   results.innerHTML = matches.length ? matches.map((work) =>
     '<button type="button" class="relation-candidate" data-work-candidate="' + work.id + '">'
-      + '<strong>' + renderBibliographicText(work.title) + '</strong>'
-      + (work.subtitle ? '<span>' + renderBibliographicText(work.subtitle) + '</span>' : '')
-      + (work.authors ? '<small>' + renderBibliographicText(work.authors) + '</small>' : '')
+      + '<strong>' + bibliographicTitle(work.title, work.scripts) + '</strong>'
+      + (work.subtitle ? '<span>' + bibliographicText(work.subtitle, work.scripts) + '</span>' : '')
+      + (work.authors ? '<small>' + bibliographicText(work.authors, work.scripts) + '</small>' : '')
       + '</button>'
   ).join('') : '<p class="empty-candidates">沒有符合條件且尚未關聯的作品。</p>';
 }
@@ -1696,9 +1716,9 @@ function createWorkEditionRow(editor, relation) {
     edition.publication_year
   ].filter(Boolean).join(' · ');
   row.innerHTML =
-    '<span class="work-edition-selected"><strong>' + renderBibliographicText(editionCandidateTitle(edition)) + '</strong>'
+    '<span class="work-edition-selected"><strong>' + bibliographicTitle(editionCandidateTitle(edition), edition.effective_metadata?.scripts?.value || '') + '</strong>'
     + (edition.effective_metadata?.subtitle?.value
-      ? '<span>' + renderBibliographicText(edition.effective_metadata.subtitle.value) + '</span>' : '')
+      ? '<span>' + bibliographicText(edition.effective_metadata.subtitle.value, edition.effective_metadata?.scripts?.value || '') + '</span>' : '')
     + (publication ? '<small>' + escapeHtml(publication) + '</small>' : '')
     + (edition.identifier ? '<small>' + renderIdentifiers(edition.identifier) + '</small>' : '')
     + '</span><select data-work-edition-type aria-label="關聯類型">'
@@ -1761,9 +1781,9 @@ function renderEditionRelationCandidates(editor) {
       edition.publication_year
     ].filter(Boolean).join(' · ');
     return '<button type="button" class="relation-candidate" data-edition-candidate="' + edition.id + '">'
-      + '<strong>' + renderBibliographicText(editionCandidateTitle(edition)) + '</strong>'
+      + '<strong>' + bibliographicTitle(editionCandidateTitle(edition), edition.effective_metadata?.scripts?.value || '') + '</strong>'
       + (edition.effective_metadata?.subtitle?.value
-        ? '<span>' + renderBibliographicText(edition.effective_metadata.subtitle.value) + '</span>' : '')
+        ? '<span>' + bibliographicText(edition.effective_metadata.subtitle.value, edition.effective_metadata?.scripts?.value || '') + '</span>' : '')
       + (publication ? '<small>' + escapeHtml(publication) + '</small>' : '')
       + (edition.identifier ? '<small>' + renderIdentifiers(edition.identifier) + '</small>' : '')
       + '</button>';
@@ -2647,8 +2667,8 @@ function renderImportPreview() {
           : '新增作品或版本';
     return `<div class="import-row">
       <label class="import-keep"><input type="checkbox" data-import-keep="${index}" checked> 保留</label>
-      <div><strong>${renderBibliographicText(book.work.title)}</strong>
-        <small>${book.work.authors ? renderBibliographicText(book.work.authors) : '—'} · ${shown(book.edition.version)} · 冊 ${book.volume.volume_title ? renderBibliographicText(book.volume.volume_title) : shown(book.volume.volume_number)}</small>
+      <div><strong>${bibliographicTitle(book.work.title, book.work.scripts)}</strong>
+        <small>${book.work.authors ? bibliographicText(book.work.authors, book.work.scripts) : '—'} · ${shown(book.edition.version)} · 冊 ${book.volume.volume_title ? bibliographicText(book.volume.volume_title, book.edition.edition_scripts || book.work.scripts) : shown(book.volume.volume_number)}</small>
         <small>${matchText}</small></div>
       <label>實物副本處理
         <select data-import-action="${index}" ${matches.length ? '' : 'disabled'}>

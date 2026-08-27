@@ -57,13 +57,32 @@ python -m uvicorn app.main:app --host 127.0.0.1 --port 17321
 
 字體檔不隨本專案發布。未設定字體庫時，WebUI 直接使用瀏覽器及作業系統的預設字體。
 
-本機若有 IMPE 字體庫，可指定其 `assets/fonts` 目錄。偵測成功後，拉丁文字使用 Libertinus，漢字使用 Shanggu；天城文、藏文、西夏文、契丹小字、諺文、假名、蒙古文及其他文字按 Unicode 區段使用相應的 Noto 等字體。若要使用 Libertinus，需另將 Web 字體放在 `static/fonts/libertinus` 或 `static/fonts/web`。
+Web 字體 face、樣式 fallback、Unicode range 與文種 route 以 IMPE 的
+`catalog/fonts.tex`、`catalog/fonts/range-profiles.tex` 和
+`core/fonts/style.tex` 為唯一來源。執行下列命令會重建
+`static/generated/fonts.css`、`font-manifest.json` 和
+`font-routes.js`；生成產物不得手動修改：
+
+```powershell
+python scripts/generate_web_fonts.py
+```
+
+前端明確使用 `Library Sans`（界面）、`Library Serif`（一般書目文字）
+和 `Library Bold`（書名）三個角色。具有文種 metadata 時，整段文字會
+切換到 IMPE 對應 family；例如日文漢字與假名共同使用 Japanese route，
+不再由 Unicode range 拼接兩種 CJK 字形。沒有本機字體庫時，瀏覽器會
+自然回退至系統預設字體。若要使用 Libertinus，需另將 Web 字體放在
+`static/fonts/libertinus` 或 `static/fonts/web`。
 
 如 IMPE 字體庫移至其他位置，可在啟動前指定：
 
 ```powershell
 $env:LIBRARY_FONT_ROOT = "D:\新的位置\assets\fonts"
 ```
+
+生成器如需讀取非同層的 IMPE repository，可使用 `IMPE_ROOT` 或
+`--impe-root` 指定；應用程式也可使用 `LIBRARY_IMPE_ROOT` 指定 IMPE
+根目錄。
 
 ## 多值字段與導出
 
