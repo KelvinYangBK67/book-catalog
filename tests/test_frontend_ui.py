@@ -228,15 +228,17 @@ class FrontendStructureTests(unittest.TestCase):
         self.assertIn("--ui-font: var(--font-sans)", CSS)
         self.assertIn("--book-font: var(--font-serif)", CSS)
         self.assertIn("--book-title-font: var(--font-bold)", CSS)
-        self.assertIn(".rendered-text, .bibliographic-input", CSS)
+        self.assertIn(".rendered-text { unicode-bidi: plaintext; }", CSS)
+        self.assertNotIn("bibliographic-input", CSS + SPECIAL_TEXT)
         self.assertIn("font: 14px/1.5 var(--ui-font)", CSS)
+        self.assertIn("font-family: var(--ui-font);", CSS)
         self.assertIn("min-height: 40px", CSS)
         self.assertIn("padding: 8px 10px", CSS)
         self.assertIn("line-height: 1.55", CSS)
         self.assertIn("grid-template-columns: 24px minmax(0, 1fr) auto", CSS)
         self.assertIn("#publisher-normalize-form { align-items: start; }", CSS)
         self.assertIn("list-style: none", CSS)
-        self.assertIn("BIBLIOGRAPHIC_SELECTOR", SPECIAL_TEXT)
+        self.assertIn("script-input-override", SPECIAL_TEXT)
 
     def test_dialog_errors_and_soft_isbn_warnings_are_local_and_persistent(self) -> None:
         self.assertIn("error.validationErrors", (
@@ -262,14 +264,14 @@ class FrontendStructureTests(unittest.TestCase):
             "/fonts/tibetan/NotoSerifTibetan-Bold.ttf",
             "/fonts/tangut/NotoSerifTangut-Regular.ttf",
             "/fonts/korean/NotoSansKR-Regular.ttf",
-            "/fonts/mongolian/mnglwhiteotf.ttf",
+            "/fonts/mongolian_baiti/monbaiti.ttf",
             "/fonts/arabic/NotoNaskhArabic-Regular.ttf",
         ):
             self.assertIn(path, FONTS)
         self.assertNotIn("Library UI", FONTS + CSS)
         self.assertNotIn("Library Bibliographic", FONTS + CSS)
 
-    def test_generated_manifest_resolves_fallbacks_and_language_routes(self) -> None:
+    def test_generated_manifest_resolves_fallbacks_and_metadata_overrides(self) -> None:
         families = FONT_MANIFEST["families"]
         for family_id in (
             "libertinus",
@@ -285,6 +287,8 @@ class FrontendStructureTests(unittest.TestCase):
             "tamil",
             "thai",
             "mongolian",
+            "mongolian_baiti",
+            "manchu",
             "tangut",
         ):
             self.assertIn(family_id, families)
@@ -309,19 +313,72 @@ class FrontendStructureTests(unittest.TestCase):
             families["tangut"]["face_sources"]["bold"],
             "regular",
         )
-        self.assertEqual(FONT_MANIFEST["aliases"]["日文"], "japanese")
+        self.assertEqual(FONT_MANIFEST["aliases"]["蒙古文"], "mongolian")
+        self.assertEqual(FONT_MANIFEST["aliases"]["滿文"], "manchu")
+        self.assertNotIn("日文", FONT_MANIFEST["aliases"])
+        self.assertNotIn("梵文", FONT_MANIFEST["aliases"])
         self.assertEqual(
             FONT_MANIFEST["profile_defaults"]["cjk-tc"],
             "shanggu",
         )
+        self.assertEqual(
+            FONT_MANIFEST["profile_defaults"]["mongolian"],
+            "mongolian_baiti",
+        )
+        self.assertEqual(
+            FONT_MANIFEST["aggregate_profile_extensions"]["latin"],
+            ["greek", "cyrillic"],
+        )
         self.assertIn(
-            '.font-serif[data-font-route="japanese"]',
+            '.font-serif[data-font-route="mongolian"]',
             FONTS,
         )
-        japanese_face = FONTS[FONTS.index('font-family: "IMPE japanese Serif"'):]
-        japanese_face = japanese_face[:japanese_face.index("\n")]
-        self.assertNotIn("unicode-range", japanese_face)
+        self.assertIn('.font-serif[data-font-route="manchu"]', FONTS)
+        self.assertNotIn('data-font-route="japanese"', FONTS)
+        self.assertNotIn('data-font-route="tibetan"', FONTS)
         self.assertIn("replaceAll('_', '-')", FONT_ROUTES)
+
+    def test_unicode_ranges_route_mixed_scripts_and_shared_mongolian_block(self) -> None:
+        libertinus_face = next(
+            line for line in FONTS.splitlines()
+            if 'font-family: "Library Serif"' in line
+            and "LibertinusSerif-Regular" in line
+        )
+        for unicode_range in (
+            "U+0100-017F",  # Śāntideva
+            "U+0370-03FF",  # Πλάτων
+            "U+0400-04FF",  # Пушкин
+        ):
+            self.assertIn(unicode_range, libertinus_face)
+
+        devanagari_face = next(
+            line for line in FONTS.splitlines()
+            if 'font-family: "Library Serif"' in line
+            and "NotoSerifDevanagari" in line
+        )
+        self.assertIn("U+0900-0950", devanagari_face)
+        japanese_face = next(
+            line for line in FONTS.splitlines()
+            if 'font-family: "Library Serif"' in line
+            and "NotoSerifJP" in line
+        )
+        self.assertIn("U+3040-309F", japanese_face)
+        self.assertNotIn("U+4E00-9FFF", japanese_face)
+        shanggu_face = next(
+            line for line in FONTS.splitlines()
+            if 'font-family: "Library Serif"' in line
+            and "ShangguSerif-Regular" in line
+        )
+        self.assertIn("U+4E00-9FFF", shanggu_face)
+
+        override_faces = "\n".join(FONTS.splitlines()[:12])
+        self.assertIn("mongolian_baiti/monbaiti.ttf", override_faces)
+        self.assertNotIn("mnglwhiteotf.ttf", override_faces)
+        self.assertNotIn("NotoSansMongolian", override_faces)
+        self.assertIn('manchu/Ab-Xy.ttf', override_faces)
+        self.assertIn('manchu/Ab-Xy_B.ttf', override_faces)
+        for unicode_range in ("U+1800-18AF", "U+200C-200D", "U+202F"):
+            self.assertIn(unicode_range, override_faces)
 
     def test_home_is_tool_focused_and_mobile_actions_are_collapsed(self) -> None:
         self.assertIn('id="catalog-title">我的藏書', HTML)
@@ -343,18 +400,20 @@ class FrontendStructureTests(unittest.TestCase):
         self.assertIn("resolveCatalogFontRoute", SPECIAL_TEXT)
         self.assertIn("window.hierojax.processFragment", SPECIAL_TEXT)
         self.assertIn("special-text-preview", SPECIAL_TEXT)
+        self.assertIn("mongolian-script-run", SPECIAL_TEXT)
+        self.assertIn("\\u1800-\\u18AF", SPECIAL_TEXT)
+        self.assertIn("\\u200C\\u200D\\u202F", SPECIAL_TEXT)
+        self.assertIn('route === "mongolian" || route === "manchu"', SPECIAL_TEXT)
+        self.assertIn('control.classList.toggle("font-sans", hasOverride)', SPECIAL_TEXT)
+        self.assertNotIn('classList.add("font-serif"', SPECIAL_TEXT)
         self.assertIn('import {escapeHtml}', SPECIAL_TEXT)
         self.assertIn("bibliographicTitle(work.title, work.scripts)", JS)
+        self.assertIn("bibliographicText(work.subtitle, work.scripts)", JS)
+        self.assertIn("bibliographicText(work.authors, work.scripts)", JS)
+        self.assertIn('document.querySelectorAll("input, textarea").forEach(updateInputRendering)', SPECIAL_TEXT)
         self.assertNotIn("renderBibliographicText", SPECIAL_TEXT + JS)
-        field_set = SPECIAL_TEXT[
-            SPECIAL_TEXT.index("const BIBLIOGRAPHIC_FIELD_NAMES"):
-            SPECIAL_TEXT.index("const PREVIEW_FIELD_NAMES")
-        ]
-        for non_bibliographic in (
-            "location", "reading_record", "tags", "publisher",
-            "edition_scripts", "scripts",
-        ):
-            self.assertNotIn(f'"{non_bibliographic}"', field_set)
+        self.assertIn("family: \"serif\"", SPECIAL_TEXT)
+        self.assertIn("family: \"bold\"", JS)
         self.assertNotIn("svg", HTML[HTML.index('name="work.title"'):HTML.index('name="work.authors"')])
 
 

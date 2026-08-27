@@ -25,32 +25,25 @@ ROLE_FIELDS = {
     "bold": "bold",
 }
 
-# These are labels users actually enter in the application's 文種 fields.
-# Values point only to IMPE family/profile identifiers; concrete faces always
-# come from catalog/fonts.tex.
-ROUTE_ALIASES = {
-    "latin": ("latin", "拉丁文", "英文", "英語", "english", "latin"),
-    "chinese_traditional": (
-        "cjk-tc", "中文", "漢文", "漢字", "繁體中文", "繁體字", "traditional chinese",
-    ),
-    "chinese_simplified": (
-        "cjk-sc", "簡體中文", "簡體字", "simplified chinese",
-    ),
-    "japanese": ("cjk-jp", "日文", "日語", "日本語", "japanese"),
-    "korean": ("cjk-kr", "韓文", "韓語", "朝鮮文", "諺文", "한국어", "korean"),
-    "tibetan": ("tibetan", "藏文", "藏語", "བོད་ཡིག", "tibetan"),
-    "devanagari": (
-        "devanagari", "天城文", "天城體", "梵文", "梵語", "印地文", "देवनागरी",
-        "devanagari", "sanskrit", "hindi",
-    ),
-    "arabic": ("arabic", "阿拉伯文", "阿拉伯語", "العربية", "arabic"),
-    "hebrew": ("hebrew", "希伯來文", "希伯來語", "עברית", "hebrew"),
-    "syriac": ("syriac", "敘利亞文", "ܣܘܪܝܝܐ", "syriac"),
-    "tamil": ("tamil", "泰米爾文", "தமிழ்", "tamil"),
-    "thai": ("thai", "泰文", "ภาษาไทย", "thai"),
-    "mongolian": ("mongolian", "蒙古文", "蒙文", "ᠮᠣᠩᠭᠣᠯ", "mongolian"),
-    "tangut": ("tangut", "西夏文", "tangut"),
+# Metadata normally has no say in font selection: Unicode ranges select the
+# concrete face character by character.  Mongolian and Manchu are the sole
+# exceptions because they share the Mongolian block but require different
+# shaping fonts.  The style values deliberately override catalog sans faces.
+METADATA_OVERRIDES = {
+    "mongolian": {
+        "family": "mongolian_baiti",
+        "aliases": ("mongolian", "蒙古文", "蒙文", "ᠮᠣᠩᠭᠣᠯ"),
+        "styles": {"serif": "regular", "sans": "regular", "bold": "regular"},
+    },
+    "manchu": {
+        "family": "manchu",
+        "aliases": ("manchu", "滿文", "满文"),
+        "styles": {"serif": "regular", "sans": "regular", "bold": "bold"},
+    },
 }
+
+# Libertinus covers all three alphabetic profiles in each display role.
+AGGREGATE_PROFILE_EXTENSIONS = {"latin": ("greek", "cyrillic")}
 
 # A profile can have several catalog families.  This list selects the
 # application default by IMPE family id only; no face name is duplicated here.
@@ -61,7 +54,10 @@ PROFILE_DEFAULTS = {
     "cjk-jp": "japanese",
     "cjk-kr": "korean",
     "devanagari": "devanagari",
+    "mongolian": "mongolian_baiti",
 }
+
+MONGOLIAN_OVERRIDE_RANGES = ("U+200C-200D", "U+202F")
 
 # Libertinus is registered by installed font name in IMPE.  The Web adapter
 # uses the equivalent locally cached files; all other faces resolve directly
@@ -414,7 +410,14 @@ def build(impe_root: Path) -> tuple[str, dict[str, object], str]:
         }
 
     route_family_ids: dict[str, str] = {}
+    absorbed_profiles = {
+        extension
+        for extensions in AGGREGATE_PROFILE_EXTENSIONS.values()
+        for extension in extensions
+    }
     for profile in profiles:
+        if profile in absorbed_profiles:
+            continue
         preferred = PROFILE_DEFAULTS.get(profile)
         candidates = [
             family_id for family_id, record in records.items()
@@ -429,18 +432,12 @@ def build(impe_root: Path) -> tuple[str, dict[str, object], str]:
     route_family_ids["latin"] = "libertinus"
 
     aliases: dict[str, str] = {}
-    for family_id, record in records.items():
-        aliases[family_id.casefold()] = family_id
-        aliases[family_id.replace("_", "-").casefold()] = family_id
-        for field in ("script", "language"):
-            value = str(record[field]).strip()
-            if value:
-                aliases[value.casefold()] = family_id
-    for family_id, labels in ROUTE_ALIASES.items():
+    for route, override in METADATA_OVERRIDES.items():
+        family_id = str(override["family"])
         if family_id not in records:
-            continue
-        for label in labels:
-            aliases[label.casefold()] = family_id
+            raise ValueError(f"Missing metadata override family: {family_id}")
+        for label in override["aliases"]:
+            aliases[str(label).casefold()] = route
 
     css_lines = [
         "/* GENERATED FILE — DO NOT EDIT.",
@@ -449,21 +446,29 @@ def build(impe_root: Path) -> tuple[str, dict[str, object], str]:
         " */",
         "",
     ]
-    for family_id, record in records.items():
-        for role, style in ROLE_FIELDS.items():
-            url = record["urls"].get(style, "")
+    override_ranges = ranges_for_profile(profiles["mongolian"], block_map)
+    override_ranges.extend(MONGOLIAN_OVERRIDE_RANGES)
+    for route, override in METADATA_OVERRIDES.items():
+        record = records[str(override["family"])]
+        for role, style in override["styles"].items():
+            url = record["urls"].get(str(style), "")
             if url:
-                css_lines.append(css_face(f"IMPE {family_id} {role.title()}", url, "400"))
-        sans_bold = record["urls"].get("sansbold", "")
-        if sans_bold:
-            css_lines.append(css_face(f"IMPE {family_id} Sans", sans_bold, "600 900"))
+                css_lines.append(css_face(
+                    f"IMPE Override {route} {str(role).title()}",
+                    url,
+                    "400",
+                    override_ranges,
+                ))
     css_lines.append("")
 
     emitted_range_signatures: set[tuple[str, ...]] = set()
     for profile, family_id in route_family_ids.items():
         if family_id not in records or profile not in profiles:
             continue
-        ranges = ranges_for_profile(profiles[profile], block_map)
+        profile_blocks = list(profiles[profile])
+        for extension in AGGREGATE_PROFILE_EXTENSIONS.get(profile, ()):
+            profile_blocks.extend(profiles[extension])
+        ranges = ranges_for_profile(profile_blocks, block_map)
         signature = tuple(ranges)
         if signature in emitted_range_signatures:
             continue
@@ -485,12 +490,11 @@ def build(impe_root: Path) -> tuple[str, dict[str, object], str]:
         '.font-serif { font-family: var(--font-serif); }',
         '.font-bold { font-family: var(--font-bold); font-weight: 400; }',
     ])
-    for family_id in records:
-        route = family_id.replace("_", "-")
+    for route in METADATA_OVERRIDES:
         for role in ROLE_FIELDS:
             css_lines.append(
                 f'.font-{role}[data-font-route="{route}"] '
-                f'{{ font-family: "IMPE {family_id} {role.title()}", var(--font-{role}); }}'
+                f'{{ font-family: "IMPE Override {route} {role.title()}", var(--font-{role}); }}'
             )
 
     manifest: dict[str, object] = {
@@ -506,6 +510,8 @@ def build(impe_root: Path) -> tuple[str, dict[str, object], str]:
         "roles": ROLE_FIELDS,
         "profiles": profiles,
         "profile_defaults": route_family_ids,
+        "aggregate_profile_extensions": AGGREGATE_PROFILE_EXTENSIONS,
+        "metadata_overrides": METADATA_OVERRIDES,
         "aliases": dict(sorted(aliases.items())),
         "families": records,
     }

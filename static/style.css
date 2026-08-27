@@ -28,21 +28,29 @@ body {
   background: var(--paper);
   font: 14px/1.5 var(--ui-font);
 }
-button, input, textarea, select { font: inherit; }
+button, input, textarea, select {
+  font: inherit;
+  font-family: var(--ui-font);
+}
 button { cursor: pointer; }
 button:disabled { cursor: wait; opacity: .58; }
 a { color: inherit; }
-.rendered-text, .bibliographic-input { unicode-bidi: plaintext; }
+.rendered-text { unicode-bidi: plaintext; }
 .rendered-text {
   line-height: 1.55;
   overflow-wrap: anywhere;
   overflow: visible;
 }
-input.bibliographic-input, textarea.bibliographic-input {
+.mongolian-script-run {
+  font-size: 1.3em;
+  line-height: 1.25;
+}
+input.script-input-override, textarea.script-input-override {
   height: auto;
   min-height: 40px;
   padding-block: 7px;
-  line-height: 1.5;
+  font-size: 1.3em;
+  line-height: 1.4;
 }
 .visually-hidden {
   position: absolute !important;

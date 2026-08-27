@@ -67,12 +67,17 @@ Web 字體 face、樣式 fallback、Unicode range 與文種 route 以 IMPE 的
 python scripts/generate_web_fonts.py
 ```
 
-前端明確使用 `Library Sans`（界面）、`Library Serif`（一般書目文字）
-和 `Library Bold`（書名）三個角色。具有文種 metadata 時，整段文字會
-切換到 IMPE 對應 family；例如日文漢字與假名共同使用 Japanese route，
-不再由 Unicode range 拼接兩種 CJK 字形。沒有本機字體庫時，瀏覽器會
-自然回退至系統預設字體。若要使用 Libertinus，需另將 Web 字體放在
-`static/fonts/libertinus` 或 `static/fonts/web`。
+前端明確使用 `Library Sans`（界面與表單）、`Library Serif`（一般書目
+文字）和 `Library Bold`（書名）三個角色；具體字體由每個字符的 Unicode
+range 決定。Latin、Greek、Cyrillic 使用 Libertinus，漢字使用 Shanggu，
+假名、諺文、天城文、藏文等則使用 IMPE range profile 對應的字體。一般
+文種 metadata 不會切換整段文字的 family。
+
+唯一的 metadata override 是共用 Mongolian Unicode block 的蒙古文與滿文：
+「蒙古文」使用 Mongolian Baiti，「滿文」使用 Ab-Xy；override 只覆蓋該
+block，同段 Latin 等字符仍走一般 Unicode range。沒有本機字體庫時，
+瀏覽器會自然回退至系統預設字體。若要使用 Libertinus，需另將 Web 字體
+放在 `static/fonts/libertinus` 或 `static/fonts/web`。
 
 如 IMPE 字體庫移至其他位置，可在啟動前指定：
 
