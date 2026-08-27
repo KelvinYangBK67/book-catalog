@@ -74,7 +74,7 @@ range 決定。Latin、Greek、Cyrillic 使用 Libertinus，漢字使用 Shanggu
 文種 metadata 不會切換整段文字的 family。
 
 唯一的 metadata override 是共用 Mongolian Unicode block 的蒙古文與滿文：
-「蒙古文」使用 Mongolian Baiti，「滿文」使用 Ab-Xy；override 只覆蓋該
+「蒙古文」使用 IMPE Mongolian family，「滿文」使用 Ab-Xy；override 只覆蓋該
 block，同段 Latin 等字符仍走一般 Unicode range。沒有本機字體庫時，
 瀏覽器會自然回退至系統預設字體。若要使用 Libertinus，需另將 Web 字體
 放在 `static/fonts/libertinus` 或 `static/fonts/web`。

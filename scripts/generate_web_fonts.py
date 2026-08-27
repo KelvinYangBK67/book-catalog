@@ -31,9 +31,9 @@ ROLE_FIELDS = {
 # shaping fonts.  The style values deliberately override catalog sans faces.
 METADATA_OVERRIDES = {
     "mongolian": {
-        "family": "mongolian_baiti",
+        "family": "mongolian",
         "aliases": ("mongolian", "蒙古文", "蒙文", "ᠮᠣᠩᠭᠣᠯ"),
-        "styles": {"serif": "regular", "sans": "regular", "bold": "regular"},
+        "styles": {"serif": "regular", "sans": "sans", "bold": "bold"},
     },
     "manchu": {
         "family": "manchu",
@@ -54,7 +54,7 @@ PROFILE_DEFAULTS = {
     "cjk-jp": "japanese",
     "cjk-kr": "korean",
     "devanagari": "devanagari",
-    "mongolian": "mongolian_baiti",
+    "mongolian": "mongolian",
 }
 
 MONGOLIAN_OVERRIDE_RANGES = ("U+200C-200D", "U+202F")

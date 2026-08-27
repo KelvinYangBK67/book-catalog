@@ -3,9 +3,9 @@
  * Rebuild: python scripts/generate_web_fonts.py
  */
 
-@font-face { font-family: "IMPE Override mongolian Serif"; src: url("/fonts/mongolian_baiti/monbaiti.ttf") format("truetype"); font-weight: 400; font-style: normal; font-display: swap; unicode-range: U+1800-18AF, U+11660-1167F, U+200C-200D, U+202F; }
-@font-face { font-family: "IMPE Override mongolian Sans"; src: url("/fonts/mongolian_baiti/monbaiti.ttf") format("truetype"); font-weight: 400; font-style: normal; font-display: swap; unicode-range: U+1800-18AF, U+11660-1167F, U+200C-200D, U+202F; }
-@font-face { font-family: "IMPE Override mongolian Bold"; src: url("/fonts/mongolian_baiti/monbaiti.ttf") format("truetype"); font-weight: 400; font-style: normal; font-display: swap; unicode-range: U+1800-18AF, U+11660-1167F, U+200C-200D, U+202F; }
+@font-face { font-family: "IMPE Override mongolian Serif"; src: url("/fonts/mongolian/mnglwhiteotf.ttf") format("truetype"); font-weight: 400; font-style: normal; font-display: swap; unicode-range: U+1800-18AF, U+11660-1167F, U+200C-200D, U+202F; }
+@font-face { font-family: "IMPE Override mongolian Sans"; src: url("/fonts/mongolian/NotoSansMongolian-Regular.ttf") format("truetype"); font-weight: 400; font-style: normal; font-display: swap; unicode-range: U+1800-18AF, U+11660-1167F, U+200C-200D, U+202F; }
+@font-face { font-family: "IMPE Override mongolian Bold"; src: url("/fonts/mongolian/mngltitleotf.ttf") format("truetype"); font-weight: 400; font-style: normal; font-display: swap; unicode-range: U+1800-18AF, U+11660-1167F, U+200C-200D, U+202F; }
 @font-face { font-family: "IMPE Override manchu Serif"; src: url("/fonts/manchu/Ab-Xy.ttf") format("truetype"); font-weight: 400; font-style: normal; font-display: swap; unicode-range: U+1800-18AF, U+11660-1167F, U+200C-200D, U+202F; }
 @font-face { font-family: "IMPE Override manchu Sans"; src: url("/fonts/manchu/Ab-Xy.ttf") format("truetype"); font-weight: 400; font-style: normal; font-display: swap; unicode-range: U+1800-18AF, U+11660-1167F, U+200C-200D, U+202F; }
 @font-face { font-family: "IMPE Override manchu Bold"; src: url("/fonts/manchu/Ab-Xy_B.ttf") format("truetype"); font-weight: 400; font-style: normal; font-display: swap; unicode-range: U+1800-18AF, U+11660-1167F, U+200C-200D, U+202F; }
@@ -154,10 +154,10 @@
 @font-face { font-family: "Library Sans"; src: url("/fonts/khitan_small/NotoSerifKhitanSmallScript-Regular.ttf") format("truetype"); font-weight: 400; font-style: normal; font-display: swap; unicode-range: U+18B00-18CFF; }
 @font-face { font-family: "Library Bold"; src: url("/fonts/khitan_small/NotoSerifKhitanSmallScript-Regular.ttf") format("truetype"); font-weight: 400; font-style: normal; font-display: swap; unicode-range: U+18B00-18CFF; }
 @font-face { font-family: "Library Sans"; src: url("/fonts/khitan_small/NotoSerifKhitanSmallScript-Regular.ttf") format("truetype"); font-weight: 600 900; font-style: normal; font-display: swap; unicode-range: U+18B00-18CFF; }
-@font-face { font-family: "Library Serif"; src: url("/fonts/mongolian_baiti/monbaiti.ttf") format("truetype"); font-weight: 400; font-style: normal; font-display: swap; unicode-range: U+1800-18AF, U+11660-1167F; }
-@font-face { font-family: "Library Sans"; src: url("/fonts/mongolian_baiti/monbaiti.ttf") format("truetype"); font-weight: 400; font-style: normal; font-display: swap; unicode-range: U+1800-18AF, U+11660-1167F; }
-@font-face { font-family: "Library Bold"; src: url("/fonts/mongolian_baiti/monbaiti.ttf") format("truetype"); font-weight: 400; font-style: normal; font-display: swap; unicode-range: U+1800-18AF, U+11660-1167F; }
-@font-face { font-family: "Library Sans"; src: url("/fonts/mongolian_baiti/monbaiti.ttf") format("truetype"); font-weight: 600 900; font-style: normal; font-display: swap; unicode-range: U+1800-18AF, U+11660-1167F; }
+@font-face { font-family: "Library Serif"; src: url("/fonts/mongolian/mnglwhiteotf.ttf") format("truetype"); font-weight: 400; font-style: normal; font-display: swap; unicode-range: U+1800-18AF, U+11660-1167F; }
+@font-face { font-family: "Library Sans"; src: url("/fonts/mongolian/NotoSansMongolian-Regular.ttf") format("truetype"); font-weight: 400; font-style: normal; font-display: swap; unicode-range: U+1800-18AF, U+11660-1167F; }
+@font-face { font-family: "Library Bold"; src: url("/fonts/mongolian/mngltitleotf.ttf") format("truetype"); font-weight: 400; font-style: normal; font-display: swap; unicode-range: U+1800-18AF, U+11660-1167F; }
+@font-face { font-family: "Library Sans"; src: url("/fonts/mongolian/NotoSansMongolian-Regular.ttf") format("truetype"); font-weight: 600 900; font-style: normal; font-display: swap; unicode-range: U+1800-18AF, U+11660-1167F; }
 @font-face { font-family: "Library Serif"; src: url("/fonts/tibetan/NotoSerifTibetan-Regular.ttf") format("truetype"); font-weight: 400; font-style: normal; font-display: swap; unicode-range: U+0F00-0FFF; }
 @font-face { font-family: "Library Sans"; src: url("/fonts/tibetan/NotoSerifTibetan-Regular.ttf") format("truetype"); font-weight: 400; font-style: normal; font-display: swap; unicode-range: U+0F00-0FFF; }
 @font-face { font-family: "Library Bold"; src: url("/fonts/tibetan/NotoSerifTibetan-Bold.ttf") format("truetype"); font-weight: 400; font-style: normal; font-display: swap; unicode-range: U+0F00-0FFF; }

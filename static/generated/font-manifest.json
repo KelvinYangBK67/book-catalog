@@ -325,7 +325,7 @@
     "bopomofo": "bopomofo",
     "tangut": "tangut",
     "khitan-small": "khitan_small",
-    "mongolian": "mongolian_baiti",
+    "mongolian": "mongolian",
     "tibetan": "tibetan",
     "latin": "libertinus"
   },
@@ -337,7 +337,7 @@
   },
   "metadata_overrides": {
     "mongolian": {
-      "family": "mongolian_baiti",
+      "family": "mongolian",
       "aliases": [
         "mongolian",
         "蒙古文",
@@ -346,8 +346,8 @@
       ],
       "styles": {
         "serif": "regular",
-        "sans": "regular",
-        "bold": "regular"
+        "sans": "sans",
+        "bold": "bold"
       }
     },
     "manchu": {

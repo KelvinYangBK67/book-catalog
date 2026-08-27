@@ -41,9 +41,13 @@ a { color: inherit; }
   overflow-wrap: anywhere;
   overflow: visible;
 }
-.mongolian-script-run {
+.mongolian-script-run,
+.manchu-script-run {
   font-size: 1.3em;
   line-height: 1.25;
+  white-space: nowrap;
+  overflow-wrap: normal;
+  word-break: keep-all;
 }
 input.script-input-override, textarea.script-input-override {
   height: auto;
@@ -51,6 +55,8 @@ input.script-input-override, textarea.script-input-override {
   padding-block: 7px;
   font-size: 1.3em;
   line-height: 1.4;
+  overflow-wrap: normal;
+  word-break: keep-all;
 }
 .visually-hidden {
   position: absolute !important;

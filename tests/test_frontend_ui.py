@@ -264,7 +264,9 @@ class FrontendStructureTests(unittest.TestCase):
             "/fonts/tibetan/NotoSerifTibetan-Bold.ttf",
             "/fonts/tangut/NotoSerifTangut-Regular.ttf",
             "/fonts/korean/NotoSansKR-Regular.ttf",
-            "/fonts/mongolian_baiti/monbaiti.ttf",
+            "/fonts/mongolian/mnglwhiteotf.ttf",
+            "/fonts/mongolian/NotoSansMongolian-Regular.ttf",
+            "/fonts/mongolian/mngltitleotf.ttf",
             "/fonts/arabic/NotoNaskhArabic-Regular.ttf",
         ):
             self.assertIn(path, FONTS)
@@ -323,7 +325,7 @@ class FrontendStructureTests(unittest.TestCase):
         )
         self.assertEqual(
             FONT_MANIFEST["profile_defaults"]["mongolian"],
-            "mongolian_baiti",
+            "mongolian",
         )
         self.assertEqual(
             FONT_MANIFEST["aggregate_profile_extensions"]["latin"],
@@ -372,9 +374,10 @@ class FrontendStructureTests(unittest.TestCase):
         self.assertIn("U+4E00-9FFF", shanggu_face)
 
         override_faces = "\n".join(FONTS.splitlines()[:12])
-        self.assertIn("mongolian_baiti/monbaiti.ttf", override_faces)
-        self.assertNotIn("mnglwhiteotf.ttf", override_faces)
-        self.assertNotIn("NotoSansMongolian", override_faces)
+        self.assertIn("mongolian/mnglwhiteotf.ttf", override_faces)
+        self.assertIn("mongolian/NotoSansMongolian-Regular.ttf", override_faces)
+        self.assertIn("mongolian/mngltitleotf.ttf", override_faces)
+        self.assertNotIn("mongolian_baiti/monbaiti.ttf", override_faces)
         self.assertIn('manchu/Ab-Xy.ttf', override_faces)
         self.assertIn('manchu/Ab-Xy_B.ttf', override_faces)
         for unicode_range in ("U+1800-18AF", "U+200C-200D", "U+202F"):
@@ -401,11 +404,17 @@ class FrontendStructureTests(unittest.TestCase):
         self.assertIn("window.hierojax.processFragment", SPECIAL_TEXT)
         self.assertIn("special-text-preview", SPECIAL_TEXT)
         self.assertIn("mongolian-script-run", SPECIAL_TEXT)
+        self.assertIn("manchu-script-run", SPECIAL_TEXT)
         self.assertIn("\\u1800-\\u18AF", SPECIAL_TEXT)
         self.assertIn("\\u200C\\u200D\\u202F", SPECIAL_TEXT)
         self.assertIn('route === "mongolian" || route === "manchu"', SPECIAL_TEXT)
         self.assertIn('control.classList.toggle("font-sans", hasOverride)', SPECIAL_TEXT)
         self.assertNotIn('classList.add("font-serif"', SPECIAL_TEXT)
+        self.assertIn(".mongolian-script-run,\n.manchu-script-run", CSS)
+        self.assertIn("font-size: 1.3em", CSS)
+        self.assertIn("white-space: nowrap", CSS)
+        self.assertIn("overflow-wrap: normal", CSS)
+        self.assertIn("word-break: keep-all", CSS)
         self.assertIn('import {escapeHtml}', SPECIAL_TEXT)
         self.assertIn("bibliographicTitle(work.title, work.scripts)", JS)
         self.assertIn("bibliographicText(work.subtitle, work.scripts)", JS)

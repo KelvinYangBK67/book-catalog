@@ -33,7 +33,9 @@ function renderTextRuns(value, route) {
       html += '<span class="hierojax" data-type="svg" data-special-source="egyptian">'
         + escapeHtml(match[0]) + "</span>";
     } else if (route === "mongolian" || route === "manchu") {
-      html += '<span class="mongolian-script-run">'
+      const runClass = route === "manchu"
+        ? "manchu-script-run" : "mongolian-script-run";
+      html += '<span class="' + runClass + '">'
         + escapeHtml(match[0]) + "</span>";
     } else {
       html += escapeHtml(match[0]);
