@@ -64,24 +64,54 @@ def _valid_isbn13(value: str) -> bool:
     return (10 - weighted % 10) % 10 == int(value[-1])
 
 
-def _canonical_isbn(value: str, *, explicit: bool) -> str | None:
-    compact = _compact_isbn(value)
+def _isbn_main(value: str) -> str:
+    """Return the printed ISBN body, excluding a local suffix after ``/``."""
+    return value.split('/', 1)[0].strip()
+
+
+def _canonical_isbn(value: str) -> str | None:
+    compact = _compact_isbn(_isbn_main(value))
     isbn_shape = bool(
         re.fullmatch(r"\d{9}[\dX]", compact)
         or re.fullmatch(r"\d{13}", compact)
     )
     if not isbn_shape:
-        if explicit:
-            raise ValueError("ISBN 格式無效；請輸入有效的 ISBN-10 或 ISBN-13")
         return None
     if len(compact) == 10:
         if _valid_isbn10(compact):
             return _isbn10_as_isbn13(compact)
     elif _valid_isbn13(compact):
         return compact
-    if explicit:
-        raise ValueError("ISBN 校驗碼不正確")
     return None
+
+
+def identifier_warnings(value: object) -> list[str]:
+    """Derive non-blocking ISBN warnings without persisting validation state."""
+    normalized = normalize_semicolon_text(value)
+    if not isinstance(normalized, str) or not normalized:
+        return []
+    warnings: list[str] = []
+    for raw_part in normalized.split('; '):
+        part = raw_part.strip()
+        qualifier = re.search(r'\s*\((?:hbk|pbk|ebook)\.?\)\s*$', part, re.I)
+        if qualifier:
+            part = part[:qualifier.start()].strip()
+        explicit = re.match(r'^ISBN\s*[:：]?\s*(.+)$', part, flags=re.IGNORECASE)
+        if explicit:
+            main = _compact_isbn(_isbn_main(explicit.group(1)))
+            shaped = bool(re.fullmatch(r'\d{9}[\dX]', main) or re.fullmatch(r'\d{13}', main))
+            if not shaped:
+                warnings.append('ISBN 格式無效，請核對實物；仍可保存。')
+            elif not (_valid_isbn10(main) or _valid_isbn13(main)):
+                warnings.append('ISBN 校驗碼不正確，請核對實物；仍可保存。')
+            continue
+        generic = re.match(r'^識別號\s+(.+)$', part)
+        if generic:
+            main = _compact_isbn(_isbn_main(generic.group(1)))
+            if (re.fullmatch(r'\d{9}[\dX]', main) or re.fullmatch(r'97[89]\d{10}', main)) \
+                    and not (_valid_isbn10(main) or _valid_isbn13(main)):
+                warnings.append('疑似 ISBN，校驗未通過；仍保留為普通識別號。')
+    return list(dict.fromkeys(warnings))
 
 
 def normalize_identifier_text(value: object) -> object:
@@ -105,8 +135,14 @@ def normalize_identifier_text(value: object) -> object:
             kind = explicit.group(1).upper()
             content = explicit.group(2).strip()
             if kind == 'ISBN':
-                content = _canonical_isbn(content, explicit=True)
-        elif (canonical_isbn := _canonical_isbn(part, explicit=False)) is not None:
+                printed_main = _isbn_main(content)
+                main = _compact_isbn(printed_main)
+                shaped = bool(
+                    re.fullmatch(r'\d{9}[\dX]', main)
+                    or re.fullmatch(r'\d{13}', main)
+                )
+                content = _canonical_isbn(content) or (main if shaped else printed_main)
+        elif (canonical_isbn := _canonical_isbn(part)) is not None:
             kind, content = 'ISBN', canonical_isbn
         elif re.match(r'^(?:統一書號|统一书号|書號|书号)\s*[:：]?\s*', part):
             match = re.match(

@@ -10,6 +10,10 @@ CSS = (ROOT / "static" / "style.css").read_text(encoding="utf-8")
 JS = (ROOT / "static" / "app.js").read_text(encoding="utf-8")
 CATALOG_MODEL = (ROOT / "static" / "catalog-model.js").read_text(encoding="utf-8")
 SPECIAL_TEXT = (ROOT / "static" / "special-text.js").read_text(encoding="utf-8")
+IDENTIFIER_VALIDATION = (
+    ROOT / "static" / "identifier-validation.js"
+).read_text(encoding="utf-8")
+FONTS = (ROOT / "static" / "fonts.css").read_text(encoding="utf-8")
 
 
 class FrontendStructureTests(unittest.TestCase):
@@ -25,19 +29,22 @@ class FrontendStructureTests(unittest.TestCase):
         first_disclosure = HTML.index('<details class="form-disclosure"')
         for name in (
             "work.title", "work.subtitle", "work.authors", "work.scripts",
-            "work.tags", "edition.publisher",
+            "work.tags",
         ):
             self.assertLess(HTML.index(f'name="{name}"'), first_disclosure)
         for name in (
             "edition.publication_year", "edition.version",
             "edition.identifier", "edition.title", "edition.subtitle",
-            "edition.series", "edition.edition_scripts",
+            "edition.series", "edition.publisher", "edition.edition_scripts",
             "edition.responsibility", "edition.other_title",
             "copy.location", "copy.acquisition_date", "copy.reading_record",
         ):
             self.assertGreater(HTML.index(f'name="{name}"'), first_disclosure)
         self.assertIn('class="span-7">題名', HTML)
         self.assertIn('class="span-5">副題名', HTML)
+        self.assertEqual(HTML.count('class="span-7">作者或主要責任人'), 2)
+        self.assertEqual(HTML.count('class="span-5">文種'), 2)
+        self.assertIn('class="span-12">出版社<input name="edition.publisher"', HTML)
 
     def test_low_frequency_fields_are_progressively_disclosed(self) -> None:
         for label in (
@@ -212,7 +219,8 @@ class FrontendStructureTests(unittest.TestCase):
         self.assertNotIn("Second-pass entry", CSS)
         self.assertNotIn("min-height: 42px", CSS)
         self.assertNotIn("height: 43px", CSS)
-        self.assertIn('--ui-font: "Library UI Latin", "Library UI Han"', CSS)
+        self.assertIn('--ui-font: "Library UI"', CSS)
+        self.assertIn('--book-font: "Library Bibliographic"', CSS)
         self.assertIn(".bibliographic-text, .bibliographic-input", CSS)
         self.assertIn("font: 14px/1.5 var(--ui-font)", CSS)
         self.assertIn("min-height: 40px", CSS)
@@ -222,6 +230,35 @@ class FrontendStructureTests(unittest.TestCase):
         self.assertIn("#publisher-normalize-form { align-items: start; }", CSS)
         self.assertIn("list-style: none", CSS)
         self.assertIn("BIBLIOGRAPHIC_SELECTOR", SPECIAL_TEXT)
+
+    def test_dialog_errors_and_soft_isbn_warnings_are_local_and_persistent(self) -> None:
+        self.assertIn("error.validationErrors", (
+            ROOT / "static" / "api.js"
+        ).read_text(encoding="utf-8"))
+        self.assertIn("function showFormError", JS)
+        self.assertIn("installFormErrorHandling()", JS)
+        self.assertIn("showFormError(form, error)", JS)
+        self.assertIn("showFormError(editForm, error)", JS)
+        self.assertIn("renderIdentifiers(edition.identifier)", JS)
+        self.assertIn("identifierWarnings", IDENTIFIER_VALIDATION)
+        self.assertIn("疑似 ISBN", IDENTIFIER_VALIDATION)
+        self.assertIn(".form-message", CSS)
+        self.assertIn(".identifier-form-warning", CSS)
+
+    def test_impe_fonts_use_two_unicode_range_composite_families(self) -> None:
+        self.assertIn('font-family: "Library UI"', FONTS)
+        self.assertIn('font-family: "Library Bibliographic"', FONTS)
+        for path in (
+            "/fonts/hindi/NotoSansDevanagari-Regular.ttf",
+            "/fonts/tibetan/NotoSerifTibetan-Regular.ttf",
+            "/fonts/tangut/NotoSerifTangut-Regular.ttf",
+            "/fonts/korean/NotoSansKR-Regular.ttf",
+            "/fonts/mongolian/mnglwhiteotf.ttf",
+            "/fonts/arabic/NotoNaskhArabic-Regular.ttf",
+        ):
+            self.assertIn(path, FONTS)
+        self.assertNotIn('font-family: "Library Text"', FONTS)
+        self.assertNotIn('font-family: "Library Sans"', FONTS)
 
     def test_home_is_tool_focused_and_mobile_actions_are_collapsed(self) -> None:
         self.assertIn('id="catalog-title">我的藏書', HTML)

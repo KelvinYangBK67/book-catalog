@@ -9,14 +9,12 @@ from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
 
-from pydantic import ValidationError
-
 from app.database import initialize
 from app.export import export_csv, export_json
 from app.repository import create_book, create_tag, get_work, list_works, update_tag
 from app.schemas import (
     BookInput, CopyInput, EditionInput, TagInput, VolumeInput, WorkInput,
-    normalize_version_text,
+    identifier_warnings, normalize_version_text,
 )
 
 
@@ -82,12 +80,26 @@ class ListNormalizationTests(unittest.TestCase):
             EditionInput(identifier='ISBN 979-10-90636-07-1').identifier,
             'ISBN 9791090636071',
         )
-        with self.assertRaisesRegex(ValidationError, 'ISBN 校驗碼不正確'):
-            EditionInput(identifier='ISBN 9780306406158')
+        self.assertEqual(
+            EditionInput(identifier='ISBN 9780306406158').identifier,
+            'ISBN 9780306406158',
+        )
+        self.assertEqual(
+            identifier_warnings('ISBN 9780306406158'),
+            ['ISBN 校驗碼不正確，請核對實物；仍可保存。'],
+        )
         self.assertEqual(
             EditionInput(identifier='9780306406158').identifier,
             '識別號 9780306406158',
         )
+        self.assertEqual(
+            identifier_warnings('識別號 9780306406158'),
+            ['疑似 ISBN，校驗未通過；仍保留為普通識別號。'],
+        )
+        for value in (
+            'LCCN 9780306406158', '統一書號 9780306406158', 'CATALOG 9780306406158'
+        ):
+            self.assertEqual(identifier_warnings(value), [])
         self.assertEqual(
             EditionInput(
                 identifier='ISBN 0-306-40615-2; ISSN 0169-8524; LCCN 2001012345'
@@ -98,6 +110,22 @@ class ListNormalizationTests(unittest.TestCase):
             EditionInput(identifier='书号 10019·1998').identifier,
             '书号 10019·1998',
         )
+
+    def test_chinese_isbn_suffix_is_discarded_after_validating_main_body(self) -> None:
+        self.assertEqual(
+            EditionInput(identifier='ISBN 978-7-5062-8280-2/O·731').identifier,
+            'ISBN 9787506282802',
+        )
+        self.assertEqual(
+            EditionInput(identifier='ISBN 7-5062-8280-1/O·731').identifier,
+            'ISBN 9787506282802',
+        )
+        invalid_ten = EditionInput(identifier='ISBN 7-5062-8280-X/O·731')
+        self.assertEqual(invalid_ten.identifier, 'ISBN 750628280X')
+        self.assertTrue(identifier_warnings(invalid_ten.identifier))
+        invalid = EditionInput(identifier='ISBN 978-7-5062-8280-3/O·731')
+        self.assertEqual(invalid.identifier, 'ISBN 9787506282803')
+        self.assertTrue(identifier_warnings(invalid.identifier))
 
     def test_editing_tag_keeps_work_assignment(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

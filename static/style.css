@@ -12,18 +12,8 @@
   --success-bg: #e8f2e9;
   --error-bg: #f8e5df;
   --shadow: 0 16px 44px rgba(46, 39, 28, .15);
-  --ui-font: "Library UI Latin", "Library UI Han", "Segoe UI", sans-serif;
-  --book-font: "Library Latin", "Library Han", "Library Han Ext B", "Library Han Ext C",
-    "Library Devanagari", "Library Tibetan", "Library Tangut", "Library Khitan",
-    "Library Hangul", "Library Kana", "Library Mongolian", "Library Arabic",
-    "Library Hebrew", "Library Syriac", "Library Armenian", "Library Georgian",
-    "Library Tamil", "Library Thai", "Library Coptic", "Library Brahmi",
-    "Library Kharosthi", "Library Cuneiform", "Library Aramaic", "Library Nabataean",
-    "Library Phoenician", "Library Avestan", "Library Inscriptional Pahlavi",
-    "Library Parthian", "Library Psalter Pahlavi", "Library Manichaean",
-    "Library Old Uyghur", "Library Sogdian", "Library Old Sogdian",
-    "Library Samaritan", "Library Glagolitic", "Library Runic", "Library Old Turkic",
-    "Library Old Hungarian", "Library Old Italic", "Library Carian", serif;
+  --ui-font: "Library UI", "Segoe UI", sans-serif;
+  --book-font: "Library Bibliographic", "Times New Roman", serif;
   --control-height: 36px;
   --radius: 3px;
 }
@@ -176,6 +166,18 @@ input.bibliographic-input, textarea.bibliographic-input, select.bibliographic-in
   color: #762b20;
   background: var(--error-bg);
   border-left-color: var(--accent);
+}
+.form-message {
+  margin: 9px 16px 0;
+  padding: 8px 10px;
+  color: #762b20;
+  background: var(--error-bg);
+  border-left: 3px solid var(--accent);
+  font-size: 12px;
+}
+.tag-create-form > .form-message {
+  grid-column: 1 / -1;
+  margin: 0;
 }
 .empty {
   padding: 42px 16px;
@@ -417,6 +419,23 @@ textarea { min-height: 72px; resize: vertical; }
 input:focus, textarea:focus, select:focus {
   border-color: var(--green);
   box-shadow: 0 0 0 2px rgba(64, 92, 74, .1);
+}
+[aria-invalid="true"] {
+  border-color: var(--accent) !important;
+  box-shadow: 0 0 0 2px rgba(155, 62, 47, .1);
+}
+.field-error, .identifier-form-warning {
+  display: block;
+  margin-top: 4px;
+  color: var(--accent-dark);
+  font-size: 11px;
+  line-height: 1.35;
+}
+.identifier-warning-mark {
+  color: #a05d12;
+  font-family: var(--ui-font);
+  font-size: .9em;
+  cursor: help;
 }
 .checkbox-option { display: flex; align-items: center; gap: 7px; min-height: var(--control-height); }
 .checkbox-option input[type="checkbox"], .copy-mode input {

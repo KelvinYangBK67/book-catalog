@@ -3,6 +3,7 @@ export async function request(url, options) {
   if (!response.ok) {
     let message = '操作失敗，請稍後再試。';
     let errorData = {};
+    let validationErrors = [];
     try {
       const body = await response.json();
       if (typeof body.detail === 'string') {
@@ -11,6 +12,7 @@ export async function request(url, options) {
         errorData = body.detail;
         message = body.detail.message || message;
       } else if (Array.isArray(body.detail)) {
+        validationErrors = body.detail;
         message = body.detail.map((item) => {
           const field = Array.isArray(item.loc)
             ? item.loc.filter((part) => part !== 'body').join(' → ') : '';
@@ -22,6 +24,7 @@ export async function request(url, options) {
     }
     const error = new Error(message);
     error.status = response.status;
+    error.validationErrors = validationErrors;
     Object.assign(error, errorData);
     throw error;
   }

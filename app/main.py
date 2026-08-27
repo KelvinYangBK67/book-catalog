@@ -56,7 +56,7 @@ if IMPE_FONTS.is_dir():
 def index() -> HTMLResponse:
     html = (STATIC / "index.html").read_text(encoding="utf-8")
     if not IMPE_FONTS.is_dir():
-        html = html.replace('  <link rel="stylesheet" href="/static/fonts.css?v=1.0.4">\n', "")
+        html = html.replace('  <link rel="stylesheet" href="/static/fonts.css?v=1.0.5">\n', "")
     return HTMLResponse(html, headers={"Cache-Control": "no-cache"})
 
 

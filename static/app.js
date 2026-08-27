@@ -8,6 +8,7 @@ import {editionRelations, groupCopies, groupedVolumes} from "./catalog-model.js"
 import {
   initializeSpecialTextRenderer, renderBibliographicText
 } from "./special-text.js";
+import {identifierWarnings, renderIdentifiers} from "./identifier-validation.js";
 
 const list = document.querySelector('#book-list');
 const count = document.querySelector('#book-count');
@@ -223,6 +224,111 @@ function renderTagControls() {
   editSelect.innerHTML = tags.map((tag) => '<option value="' + tag.id + '">' + escapeHtml(tagOptionLabel(tag)) + '</option>').join('');
   if (selectedTagId && tags.some((tag) => tag.id === selectedTagId)) editSelect.value = String(selectedTagId);
   fillTagEditForm();
+}
+
+function formMessageRegion(formElement) {
+  let region = formElement.querySelector(':scope > .form-message');
+  if (region) return region;
+  region = document.createElement('div');
+  region.className = 'form-message';
+  region.setAttribute('role', 'alert');
+  region.hidden = true;
+  const actions = formElement.querySelector(':scope > .dialog-actions');
+  if (actions) formElement.insertBefore(region, actions);
+  else formElement.append(region);
+  return region;
+}
+
+function clearFormError(formElement) {
+  const region = formElement.querySelector(':scope > .form-message');
+  if (region) {
+    region.hidden = true;
+    region.textContent = '';
+  }
+  formElement.querySelectorAll('.field-error').forEach((item) => item.remove());
+  formElement.querySelectorAll('[aria-invalid="true"]').forEach((item) => {
+    item.removeAttribute('aria-invalid');
+  });
+}
+
+function validationControl(formElement, location) {
+  const parts = (location || []).filter((part) => part !== 'body').map(String);
+  const candidates = [parts.join('.'), parts.at(-1)].filter(Boolean);
+  for (const name of candidates) {
+    const repeated = repeatableContainer(formElement, name);
+    if (repeated) return repeated;
+    const control = formElement.elements.namedItem(name);
+    if (control instanceof HTMLElement) return control;
+  }
+  return null;
+}
+
+function showFormError(formElement, error) {
+  const region = formMessageRegion(formElement);
+  region.textContent = error.message || '保存失敗，請檢查表單內容。';
+  region.hidden = false;
+  for (const item of error.validationErrors || []) {
+    const control = validationControl(formElement, item.loc);
+    if (!control) continue;
+    control.setAttribute('aria-invalid', 'true');
+    const host = control.closest('label') || control.parentElement;
+    if (!host || host.querySelector(':scope > .field-error')) continue;
+    const fieldError = document.createElement('small');
+    fieldError.className = 'field-error';
+    fieldError.textContent = item.msg;
+    host.append(fieldError);
+  }
+}
+
+function installFormErrorHandling() {
+  document.querySelectorAll('dialog form').forEach((formElement) => {
+    formMessageRegion(formElement);
+    formElement.addEventListener('input', () => clearFormError(formElement));
+    formElement.addEventListener('change', () => clearFormError(formElement));
+  });
+}
+
+function identifierFieldValue(formElement, name) {
+  return repeatableContainer(formElement, name)
+    ? repeatableValue(formElement, name)
+    : (formElement.elements.namedItem(name)?.value || '');
+}
+
+function updateIdentifierWarning(formElement, name) {
+  const repeated = repeatableContainer(formElement, name);
+  const control = repeated || formElement.elements.namedItem(name);
+  if (!(control instanceof HTMLElement)) return;
+  const host = control.closest('label') || control.parentElement;
+  if (!host) return;
+  let warning = host.querySelector(':scope > .identifier-form-warning');
+  if (!warning) {
+    warning = document.createElement('small');
+    warning.className = 'identifier-form-warning';
+    host.append(warning);
+  }
+  const messages = identifierWarnings(identifierFieldValue(formElement, name));
+  warning.textContent = messages.length ? '⚠ ' + messages.join(' ') : '';
+  warning.hidden = messages.length === 0;
+}
+
+function installIdentifierWarnings() {
+  const fields = [
+    [form, 'edition.identifier'],
+    [form, 'volume.identifier'],
+    [document.querySelector('#edition-edit-form'), 'identifier'],
+    [document.querySelector('#volume-edit-form'), 'identifier']
+  ];
+  for (const [formElement, name] of fields) {
+    if (!formElement) continue;
+    formElement.addEventListener('input', () => updateIdentifierWarning(formElement, name));
+    formElement.addEventListener('change', () => updateIdentifierWarning(formElement, name));
+    formElement.addEventListener('click', (event) => {
+      if (!event.target.closest('.repeatable-add, .repeatable-remove')) return;
+      clearFormError(formElement);
+      queueMicrotask(() => updateIdentifierWarning(formElement, name));
+    });
+    updateIdentifierWarning(formElement, name);
+  }
 }
 
 function setupTagPickers() {
@@ -873,7 +979,8 @@ function editionHeader(group, options = {}) {
   const summary = editionSummaryData(group, options);
   const {display, publication, scripts, versions, identifiers, responsibilities} = summary;
   const bibliography = [
-    ...versions.map(escapeHtml), publication, ...identifiers.map(escapeHtml)
+    ...versions.map(escapeHtml), publication,
+    ...identifiers.map((value) => renderIdentifiers(value, ''))
   ].filter(Boolean);
   const title = display.title
     ? renderBibliographicText(display.title)
@@ -984,7 +1091,7 @@ function volumeOverrideSummary(volume) {
   const identifiers = splitTerms(volume.identifier);
   return {
     metadata: metadata.join(' · '),
-    identifiers: identifiers.map(escapeHtml).join('<br>')
+    identifiers: identifiers.map((value) => renderIdentifiers(value, '')).join('<br>')
   };
 }
 
@@ -1593,7 +1700,7 @@ function createWorkEditionRow(editor, relation) {
     + (edition.effective_metadata?.subtitle?.value
       ? '<span>' + renderBibliographicText(edition.effective_metadata.subtitle.value) + '</span>' : '')
     + (publication ? '<small>' + escapeHtml(publication) + '</small>' : '')
-    + (edition.identifier ? '<small>' + shownLines(edition.identifier) + '</small>' : '')
+    + (edition.identifier ? '<small>' + renderIdentifiers(edition.identifier) + '</small>' : '')
     + '</span><select data-work-edition-type aria-label="關聯類型">'
     + '<option value="contained"' + (relationType === 'contained' ? ' selected' : '') + '>同冊收錄</option>'
     + '<option value="volume"' + (relationType === 'volume' ? ' selected' : '') + '>分冊</option></select>'
@@ -1658,7 +1765,7 @@ function renderEditionRelationCandidates(editor) {
       + (edition.effective_metadata?.subtitle?.value
         ? '<span>' + renderBibliographicText(edition.effective_metadata.subtitle.value) + '</span>' : '')
       + (publication ? '<small>' + escapeHtml(publication) + '</small>' : '')
-      + (edition.identifier ? '<small>' + escapeHtml(edition.identifier) + '</small>' : '')
+      + (edition.identifier ? '<small>' + renderIdentifiers(edition.identifier) + '</small>' : '')
       + '</button>';
   }).join('') : '<p class="empty-candidates">沒有符合條件且尚未關聯的版本。</p>';
 }
@@ -1713,6 +1820,7 @@ function setupWorkEditionLinks() {
 
 function openWorkEditor(work = null) {
   const editForm = document.querySelector('#work-edit-form');
+  clearFormError(editForm);
   editForm.reset();
   editForm.querySelectorAll('[data-disclosure]').forEach((details) => {
     details.open = false;
@@ -1742,6 +1850,7 @@ function openForm(
   book = null, presetWork = null, presetEdition = null,
   primaryWorkId = null, existingEditionId = null
 ) {
+  clearFormError(form);
   form.reset();
   form.querySelector('[data-translation-identity]').dataset.translationMode = '';
   form.querySelectorAll('[data-disclosure]').forEach((details) => {
@@ -1826,6 +1935,8 @@ function openForm(
     }
   }
   updateDisclosureCounts(form);
+  updateIdentifierWarning(form, 'edition.identifier');
+  updateIdentifierWarning(form, 'volume.identifier');
   form.querySelectorAll('[data-disclosure].has-values').forEach((details) => {
     details.open = true;
   });
@@ -1928,6 +2039,7 @@ async function refreshActiveDetail() {
 function openEditionEditor(group) {
   activeEdition = group;
   const editForm = document.querySelector('#edition-edit-form');
+  clearFormError(editForm);
   editForm.reset();
   editForm.querySelector('[data-translation-identity]').dataset.translationMode = '';
   editForm.querySelectorAll('[data-disclosure]').forEach((details) => {
@@ -1958,6 +2070,7 @@ function openEditionEditor(group) {
   ].some((value) => String(value || '').trim());
   updateTranslationFields(editForm, {preserve: false});
   updateDisclosureCounts(editForm);
+  updateIdentifierWarning(editForm, 'identifier');
   editForm.querySelectorAll('[data-disclosure].has-values').forEach((details) => {
     details.open = true;
   });
@@ -1966,6 +2079,7 @@ function openEditionEditor(group) {
 
 function openVolumeEditor(volume = null, editionId = null) {
   const editForm = document.querySelector('#volume-edit-form');
+  clearFormError(editForm);
   editForm.reset();
   activeVolume = volume;
   activeEdition = findEditionGroup(editionId ?? volume?.edition_id);
@@ -1978,11 +2092,13 @@ function openVolumeEditor(volume = null, editionId = null) {
   editForm.querySelector('[data-volume-inherits]').checked =
     !volumeOverridesPresent(volume);
   updateVolumeInheritance(editForm);
+  updateIdentifierWarning(editForm, 'identifier');
   volumeEditDialog.showModal();
 }
 
 function openCopyEditor(copy = null, volumeId = null) {
   const editForm = document.querySelector('#copy-edit-form');
+  clearFormError(editForm);
   editForm.reset();
   editingCopyId = copy?.id ?? null;
   editingCopyVolumeId = Number(volumeId ?? copy?.volume_id);
@@ -2293,6 +2409,7 @@ document.querySelector('#publisher-list').addEventListener('click', async (event
 });
 document.querySelector('#tag-form').addEventListener('submit', async (event) => {
   event.preventDefault();
+  const tagForm = event.currentTarget;
   const name = document.querySelector('#tag-name').value.trim();
   const parent = document.querySelector('#tag-parent').value;
   if (!name) return;
@@ -2302,14 +2419,16 @@ document.querySelector('#tag-form').addEventListener('submit', async (event) => 
       body: JSON.stringify({name, parent_id: parent ? Number(parent) : null})
     });
     document.querySelector('#tag-name').value = '';
+    clearFormError(tagForm);
     await loadTags();
   } catch (error) {
-    flash(error.message, 'error');
+    showFormError(tagForm, error);
   }
 });
 document.querySelector('#tag-edit-id').addEventListener('change', fillTagEditForm);
 document.querySelector('#tag-edit-form').addEventListener('submit', async (event) => {
   event.preventDefault();
+  const tagEditForm = event.currentTarget;
   const tagId = Number(document.querySelector('#tag-edit-id').value);
   selectedTagId = tagId;
   const parent = document.querySelector('#tag-edit-parent').value;
@@ -2319,8 +2438,9 @@ document.querySelector('#tag-edit-form').addEventListener('submit', async (event
       body: JSON.stringify({name: document.querySelector('#tag-edit-name').value.trim(), parent_id: parent ? Number(parent) : null})
     });
     await loadTags(); await loadWorks(searchInput.value);
+    clearFormError(tagEditForm);
     flash('標籤已更新。');
-  } catch (error) { flash(error.message, 'error'); }
+  } catch (error) { showFormError(tagEditForm, error); }
 });
 document.querySelector('#publisher-normalize-form').addEventListener('submit', async (event) => {
   event.preventDefault();
@@ -2337,10 +2457,11 @@ document.querySelector('#publisher-normalize-form').addEventListener('submit', a
       method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({canonical_name: canonicalName, aliases})
     });
+    clearFormError(normalizeForm);
     normalizeForm.reset();
     await loadPublishers(); await loadWorks(searchInput.value);
     flash('出版社正規名稱與既有名稱已關聯。');
-  } catch (error) { flash(error.message, 'error'); }
+  } catch (error) { showFormError(normalizeForm, error); }
 });
 document.querySelector('#work-edit-form').addEventListener('submit', async (event) => {
   event.preventDefault();
@@ -2365,6 +2486,7 @@ document.querySelector('#work-edit-form').addEventListener('submit', async (even
       })
     });
     editingWorkId = activeWork.id;
+    clearFormError(editForm);
     workEditDialog.close();
     await loadTags();
     await loadWorks(searchInput.value);
@@ -2372,7 +2494,7 @@ document.querySelector('#work-edit-form').addEventListener('submit', async (even
     renderWorkDetail(activeWork);
     if (!detailDialog.open) detailDialog.showModal();
     flash(isNew ? '作品已建立並完成版本關聯。' : '作品資料與版本關聯已更新。');
-  } catch (error) { flash(error.message, 'error'); }
+  } catch (error) { showFormError(editForm, error); }
 });
 document.querySelector('#edition-edit-form').addEventListener('submit', async (event) => {
   event.preventDefault();
@@ -2403,12 +2525,13 @@ document.querySelector('#edition-edit-form').addEventListener('submit', async (e
           ? get('translated_subtitle') : ''
       })
     });
+    clearFormError(editForm);
     activeWork = await request(`/api/works/${activeWork.id}`);
     editionEditDialog.close();
     await loadPublishers(); await loadWorks(searchInput.value);
     renderCurrentDetail();
     flash('版本資料已更新。');
-  } catch (error) { flash(error.message, 'error'); }
+  } catch (error) { showFormError(editForm, error); }
 });
 document.querySelector('#volume-edit-form').addEventListener('submit', async (event) => {
   event.preventDefault();
@@ -2435,11 +2558,12 @@ document.querySelector('#volume-edit-form').addEventListener('submit', async (ev
         `/api/editions/${activeEdition.id}/volumes`, {method: 'POST'}, payload
       );
     }
+    clearFormError(editForm);
     volumeEditDialog.close();
     await refreshActiveDetail();
     flash(activeVolume ? '冊資料已更新。' : '新冊已建立。');
   } catch (error) {
-    flash(error.message, 'error');
+    showFormError(editForm, error);
   }
 });
 
@@ -2461,12 +2585,13 @@ document.querySelector('#copy-edit-form').addEventListener('submit', async (even
         `/api/volumes/${editingCopyVolumeId}/copies`, {method: 'POST'}, payload
       );
     }
+    clearFormError(editForm);
     copyEditDialog.close();
     if (copyDialog.open) copyDialog.close();
     await refreshActiveDetail();
     flash(editingCopyId ? '館藏資料已更新。' : '實物副本已新增。');
   } catch (error) {
-    flash(error.message, 'error');
+    showFormError(editForm, error);
   }
 });
 form.addEventListener('submit', async (event) => {
@@ -2488,13 +2613,14 @@ form.addEventListener('submit', async (event) => {
         method: id ? 'PUT' : 'POST', headers: {'Content-Type': 'application/json'}
       }, payload);
     }
+    clearFormError(form);
     bookDialog.close();
     await loadTags(); await loadPublishers(); await loadWorks(searchInput.value);
     if (id) flash('藏書資料已更新。');
     else if (isBatch) flash('已在同一版本下新增 ' + saved.length + ' 冊。');
     else flash('實物副本已加入書架。');
   } catch (error) {
-    flash(error.message, 'error');
+    showFormError(form, error);
   } finally {
     saveButton.disabled = false;
   }
@@ -2600,7 +2726,7 @@ document.querySelector('#import-confirm').addEventListener('click', async () => 
     await loadTags(); await loadPublishers(); await loadWorks(searchInput.value);
     flash(`已新增 ${result.imported} 冊，覆蓋 ${result.overwritten}  份實物副本。`);
   } catch (error) {
-    flash(error.message, 'error');
+    document.querySelector('#import-summary').textContent = error.message;
     button.disabled = false;
   }
 });
@@ -2644,6 +2770,8 @@ function setupMobileActions() {
 form.elements.namedItem('work.authors').placeholder = '多項用半角分號 ; 分隔';
 form.elements.namedItem('work.scripts').placeholder = '多項用半角分號 ; 分隔';
 setupTagPickers();
+installFormErrorHandling();
+installIdentifierWarnings();
 updateDisclosureCounts(form);
 document.querySelectorAll('form').forEach((currentForm) => {
   const refreshDisclosures = () => updateDisclosureCounts(currentForm);
