@@ -235,6 +235,11 @@ class FrontendStructureTests(unittest.TestCase):
         self.assertIn("min-height: 40px", CSS)
         self.assertIn("padding: 8px 10px", CSS)
         self.assertIn("line-height: 1.55", CSS)
+        self.assertIn(
+            ".edition-title-pair > strong, .edition-title-pair > span { display: block; }",
+            CSS,
+        )
+        self.assertNotIn(".edition-title-pair strong, .edition-title-pair span", CSS)
         self.assertIn("grid-template-columns: 24px minmax(0, 1fr) auto", CSS)
         self.assertIn("#publisher-normalize-form { align-items: start; }", CSS)
         self.assertIn("list-style: none", CSS)

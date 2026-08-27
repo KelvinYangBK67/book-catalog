@@ -697,9 +697,9 @@ input:focus, textarea:focus, select:focus {
 .edition-detail-item > small { display: block; margin-bottom: 2px; color: var(--muted); font-size: 10px; }
 .title-pair-detail { grid-column: 1 / -1; }
 .edition-title-pairs { display: grid; gap: 5px; }
-.edition-title-pair strong, .edition-title-pair span { display: block; }
-.edition-title-pair strong { font-size: 14px; }
-.edition-title-pair span { color: var(--muted); font-size: 12px; }
+.edition-title-pair > strong, .edition-title-pair > span { display: block; }
+.edition-title-pair > strong { font-size: 14px; }
+.edition-title-pair > span { color: var(--muted); font-size: 12px; }
 .edition-related-works { display: grid; gap: 4px; margin: 0; padding-left: 19px; }
 .edition-related-works li strong, .edition-related-works li span { display: block; }
 .edition-related-works li span { color: var(--muted); font-size: 11px; }
